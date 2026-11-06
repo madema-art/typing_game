@@ -1,0 +1,24 @@
+{
+  "name": "keystorm",
+  "private": true,
+  "version": "1.0.0",
+  "description": "KEYSTORM - an arcade survival typing game. Type the words, destroy the ships, defend the Spire.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3",
+    "vite": "^8.3.6"
+  },
+  "dependencies": {
+    "@fontsource/jetbrains-mono": "^5.3.0",
+    "@fontsource/orbitron": "^5.3.0"
+  }
+}

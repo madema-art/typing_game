@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#05050f" />
+    <meta name="description" content="KEYSTORM — an arcade survival typing game. Type the words, destroy the ships, defend the Spire." />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>KEYSTORM</title>
+  </head>
+  <body>
+    <main id="app" aria-label="KEYSTORM game">
+      <canvas id="game" aria-hidden="true"></canvas>
+
+      <!-- In-game HUD -->
+      <div id="hud" class="hud" aria-hidden="true">
+        <div class="hud-block hud-score">
+          <div class="hud-label">Score</div>
+          <div class="hud-score-value" id="hud-score">0</div>
+          <div class="hud-mult" id="hud-mult"><span>×1</span> multiplier</div>
+        </div>
+        <div class="hud-block hud-wave">
+          <div class="hud-label">Wave <b id="hud-wave">1</b></div>
+          <div class="wave-bar"><i id="hud-wavebar"></i></div>
+        </div>
+        <div class="hud-block hud-typing">
+          <div class="hud-label">Typing</div>
+          <div class="hud-typing-row">
+            <span class="metric"><b id="hud-wpm">—</b><small>WPM</small></span>
+            <span class="metric"><b id="hud-acc">100</b><small>% ACC</small></span>
+          </div>
+        </div>
+        <div class="hud-shield">
+          <div class="hud-label">Shield</div>
+          <div class="pips" id="hud-pips"></div>
+        </div>
+      </div>
+
+      <!-- Wave banner -->
+      <div id="banner" class="banner" aria-live="polite">
+        <div class="banner-sub" id="banner-sub"></div>
+        <div class="banner-main" id="banner-main"></div>
+        <div class="banner-detail" id="banner-detail"></div>
+      </div>
+
+      <!-- Title -->
+      <section id="screen-title" class="screen screen-title" aria-label="Title screen">
+        <div class="title-wrap">
+          <div class="logo" aria-label="KEYSTORM">
+            <span class="logo-glow" aria-hidden="true">KEYSTORM</span>
+            <span class="logo-text" data-text="KEYSTORM">KEYSTORM</span>
+          </div>
+          <p class="tagline">Every keystroke is a shot. Every word is a kill.</p>
+
+          <div class="start-prompt">
+            <span class="prompt-label">Type</span>
+            <span class="typeword" id="title-word" data-word="start"></span>
+            <span class="prompt-label">or press <kbd>Enter</kbd></span>
+          </div>
+
+          <ol class="howto">
+            <li><span><b>Type</b> a ship's word to lock on &amp; fire</span></li>
+            <li><span><b>Finish</b> the word to destroy it</span></li>
+            <li><span><b>Hold</b> the shield as long as you can</span></li>
+          </ol>
+
+          <div class="title-lower">
+            <div class="scores">
+              <h3>Hall of Defenders</h3>
+              <table id="title-scores"></table>
+            </div>
+            <div class="keys">
+              <h3>Controls</h3>
+              <dl>
+                <dt><kbd>A–Z</kbd></dt><dd>Lock &amp; fire</dd>
+                <dt><kbd>Backspace</kbd></dt><dd>Release lock</dd>
+                <dt><kbd>Esc</kbd></dt><dd>Pause / resume</dd>
+              </dl>
+              <div class="options">
+                <button type="button" class="opt" id="opt-sound" tabindex="-1"></button>
+                <button type="button" class="opt" id="opt-motion" tabindex="-1"></button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Pause -->
+      <section id="screen-pause" class="screen screen-pause" aria-label="Paused">
+        <div class="pause-wrap">
+          <h2 class="screen-heading">Paused</h2>
+          <div class="pause-stats" id="pause-stats"></div>
+          <div class="menu">
+            <button type="button" class="menu-item" data-action="resume" tabindex="-1"><kbd>Esc</kbd> Resume</button>
+            <button type="button" class="menu-item" data-action="restart" tabindex="-1"><kbd>R</kbd> Restart</button>
+            <button type="button" class="menu-item" data-action="sound" tabindex="-1"><kbd>M</kbd> <span id="pause-sound">Sound on</span></button>
+            <button type="button" class="menu-item" data-action="quit" tabindex="-1"><kbd>Q</kbd> Quit to title</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Game over -->
+      <section id="screen-over" class="screen screen-over" aria-label="Game over">
+        <div class="over-wrap">
+          <div class="over-kicker">The Spire has fallen</div>
+          <h2 class="screen-heading over-heading">Game Over</h2>
+          <div class="new-best" id="over-best">New high score</div>
+          <div class="final-score">
+            <span class="final-label">Final score</span>
+            <span class="final-value" id="over-score">0</span>
+          </div>
+          <div class="stat-grid">
+            <div class="stat"><span class="stat-value" id="over-wpm">0</span><span class="stat-label">WPM</span></div>
+            <div class="stat"><span class="stat-value" id="over-acc">0%</span><span class="stat-label">Accuracy</span></div>
+            <div class="stat"><span class="stat-value" id="over-combo">0</span><span class="stat-label">Longest combo</span></div>
+            <div class="stat"><span class="stat-value" id="over-wave">1</span><span class="stat-label">Wave reached</span></div>
+            <div class="stat"><span class="stat-value" id="over-kills">0</span><span class="stat-label">Ships destroyed</span></div>
+          </div>
+          <div class="start-prompt">
+            <span class="prompt-label">Type</span>
+            <span class="typeword" id="over-word" data-word="again"></span>
+            <span class="prompt-label">or press <kbd>Enter</kbd> · <kbd>Esc</kbd> title</span>
+          </div>
+          <div class="scores compact">
+            <table id="over-scores"></table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Always-available controls -->
+      <div class="corner" id="corner">
+        <button type="button" class="icon-btn" id="btn-sound" tabindex="-1" aria-label="Toggle sound"></button>
+        <button type="button" class="icon-btn" id="btn-pause" tabindex="-1" aria-label="Pause">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+        </button>
+      </div>
+
+      <div class="focus-hint" id="focus-hint">Click to focus the game</div>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
