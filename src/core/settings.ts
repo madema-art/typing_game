@@ -2,12 +2,13 @@ import { loadJSON, saveJSON } from './storage';
 
 export interface Settings {
   muted: boolean;
+  music: boolean;
   /** 'auto' follows the OS prefers-reduced-motion setting. */
   motion: 'auto' | 'full' | 'reduced';
 }
 
 const KEY = 'keystorm.settings.v1';
-const DEFAULTS: Settings = { muted: false, motion: 'auto' };
+const DEFAULTS: Settings = { muted: false, music: true, motion: 'auto' };
 
 const mq = typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
 

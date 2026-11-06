@@ -34,15 +34,23 @@ export class App {
   private overShownAt = 0;
   private resizeQueued = false;
   private redrawWhilePaused = false;
+  private hitStop = 0;
+  private musicKey = '';
+  private slowTime = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new Renderer(canvas, this.layout, this.game);
+    this.renderer.beatPhase = () => this.sound.beatPhase();
+    this.renderer.onHitStop = (s) => {
+      if (!this.settings.reducedMotion) this.hitStop = Math.max(this.hitStop, s);
+    };
     this.renderer.resize();
     this.applySettings();
     this.settings.onChange(() => this.applySettings());
     this.wireGameEvents();
     this.wireDom();
     this.ui.renderTitleScores(loadHighScores());
+    this.game.toIdle();
     this.setScreen('title');
   }
 
@@ -65,19 +73,52 @@ export class App {
     const dt = Math.min(0.05, Math.max(0, (now - this.lastTime) / 1000));
     this.lastTime = now;
 
+    // Quality governor: if frames stay slow (< ~50 fps) for a while, drop the costliest effects.
+    if (this.renderer.quality === 'high' && this.screen === 'playing' && !document.hidden) {
+      this.slowTime = dt > 0.02 ? this.slowTime + dt : Math.max(0, this.slowTime - dt * 0.5);
+      if (this.slowTime > 3) this.renderer.quality = 'low';
+    }
+
     const paused = this.screen === 'paused';
-    if (!paused) this.game.update(dt);
+    if (!paused) {
+      if (this.hitStop > 0) this.hitStop -= dt;
+      else this.game.update(dt);
+    }
     // While paused the world is frozen behind a blurred overlay; skipping redraws keeps the blur cheap.
     if (!paused || this.redrawWhilePaused) {
       this.renderer.render(dt, paused);
       this.redrawWhilePaused = false;
     }
     if (this.screen === 'playing' || this.screen === 'paused') this.ui.updateHud(this.game, dt);
+    this.updateMusic();
 
     if (this.screen === 'playing' && this.game.phase === 'over') this.showGameOver();
 
     requestAnimationFrame(this.frame);
   };
+
+  /** Drive the adaptive soundtrack from the game state. */
+  private updateMusic(): void {
+    const g = this.game;
+    let level = 0;
+    if (this.screen === 'playing' || this.screen === 'paused') {
+      if (g.phase === 'playing') {
+        const base = g.wave <= 2 ? 2 : g.wave <= 5 ? 3 : 4;
+        level = g.wavePhase === 'combat' ? base : g.wavePhase === 'intro' ? Math.max(1, base - 1) : 1;
+      }
+    }
+    const overdrive = g.overdrive;
+    const danger = g.phase === 'playing' && g.integrity <= 3;
+    const key = `${level}|${overdrive}|${danger}`;
+    if (key !== this.musicKey) {
+      this.musicKey = key;
+      this.sound.setMusicState({ level, overdrive, danger });
+    }
+  }
+
+  private pan(x: number): number {
+    return (x / this.layout.w) * 2 - 1;
+  }
 
   // ------------------------------------------------------------------ state changes
 
@@ -85,13 +126,15 @@ export class App {
     this.screen = s;
     this.ui.show(s);
     this.ui.setBannerPaused(s === 'paused');
-    this.sound.suspendAmbience(s === 'paused');
+    this.sound.setMuffled(s === 'paused');
+    this.sound.setDemo(s === 'title');
     this.ui.setFocusHint(s === 'title' && !document.hasFocus());
   }
 
   private startGame(): void {
     this.renderer.particles.clear();
     this.ui.resetHud();
+    this.hitStop = 0;
     this.game.start();
     this.setScreen('playing');
   }
@@ -136,6 +179,12 @@ export class App {
     this.sound.ui();
   }
 
+  private toggleMusic(): void {
+    this.sound.unlock();
+    this.settings.set('music', !this.settings.data.music);
+    this.sound.ui(2);
+  }
+
   private cycleMotion(): void {
     const order = ['auto', 'full', 'reduced'] as const;
     const i = order.indexOf(this.settings.data.motion);
@@ -145,7 +194,9 @@ export class App {
   private applySettings(): void {
     const muted = this.settings.data.muted;
     this.sound.setMuted(muted);
+    this.sound.setMusicEnabled(this.settings.data.music);
     this.ui.setSound(muted);
+    this.ui.setMusic(this.settings.data.music);
     const reduced = this.settings.reducedMotion;
     this.renderer.setReducedMotion(reduced);
     this.ui.setMotion(this.settings.data.motion, reduced);
@@ -156,14 +207,26 @@ export class App {
   private wireGameEvents(): void {
     const ev = this.game.events;
     const snd = this.sound;
-    ev.on('shot', ({ index, final }) => snd.shot(index, this.game.stats.multiplier, final));
-    ev.on('lock', () => snd.lock());
+    ev.on('shot', ({ enemy, index, final }) => {
+      if (!final) snd.shot(index, this.game.stats.multiplier, this.pan(enemy.px));
+    });
+    ev.on('strike', ({ enemy }) => snd.strike(enemy.word.length, this.pan(enemy.px)));
+    ev.on('spawn', ({ enemy }) => {
+      if (enemy.def.kind === 'heavy') snd.spawnHeavy(this.pan(enemy.px));
+    });
+    ev.on('lock', ({ enemy }) => snd.lock(this.pan(enemy.px)));
     ev.on('miss', () => snd.miss());
-    ev.on('hit', () => snd.hit());
-    ev.on('kill', ({ enemy }) => snd.explode(enemy.def.kind));
-    ev.on('baseHit', () => snd.baseHit());
+    ev.on('hit', ({ x }) => snd.hit(this.pan(x)));
+    ev.on('kill', ({ enemy, x, perfect }) => {
+      snd.explode(enemy.def.kind, this.pan(x));
+      if (perfect) snd.perfect(this.pan(x));
+    });
+    ev.on('baseHit', ({ x }) => snd.baseHit(this.pan(x)));
     ev.on('comboBreak', () => snd.comboBreak());
-    ev.on('multiplierUp', ({ multiplier }) => snd.multiplierUp(multiplier));
+    ev.on('multiplierUp', ({ multiplier }) => {
+      if (multiplier >= 5) snd.overdrive();
+      else snd.multiplierUp(multiplier);
+    });
     ev.on('gameOver', () => snd.gameOver());
     ev.on('waveStart', ({ wave }) => {
       snd.waveStart();
@@ -179,8 +242,8 @@ export class App {
       const detail = `+${bonus.toLocaleString('en-US')} bonus${tags.length ? ' · ' + tags.join(' · ') : ''}`;
       this.ui.showBanner(`Wave ${wave}`, 'Cleared', detail, 'clear');
     });
-    this.renderer.bg.onThunder = (i) => {
-      if (this.screen === 'playing' || this.screen === 'title') snd.thunder(i);
+    this.renderer.bg.onThunder = (i, pan) => {
+      if (this.screen === 'playing' || this.screen === 'title') snd.thunder(i, pan);
     };
   }
 
@@ -210,6 +273,7 @@ export class App {
     });
 
     this.ui.onSoundToggle(() => this.toggleMute());
+    this.ui.onMusicToggle(() => this.toggleMusic());
     this.ui.onMotionToggle(() => this.cycleMotion());
     this.ui.onPauseClick(() => this.pause());
     this.ui.onPauseMenu((a) => this.pauseAction(a));
@@ -233,6 +297,9 @@ export class App {
         break;
       case 'sound':
         this.toggleMute();
+        break;
+      case 'music':
+        this.toggleMusic();
         break;
     }
   }
@@ -266,14 +333,7 @@ export class App {
         if (e.key === 'Enter' || e.key === ' ') {
           this.sound.uiConfirm();
           this.startGame();
-        } else if (letter) {
-          const r = this.ui.titlePrompt.type(letter);
-          if (r === 'complete') {
-            this.sound.uiConfirm();
-            window.setTimeout(() => this.screen === 'title' && this.startGame(), 180);
-          } else if (r === 'ok') this.sound.ui();
-          else this.sound.miss();
-        }
+        } else if (letter) this.menuType(this.ui.titlePrompt, letter, 'title');
         break;
 
       case 'playing':
@@ -292,6 +352,7 @@ export class App {
         else if (letter === 'r') this.startGame();
         else if (letter === 'q') this.toTitle();
         else if (letter === 'm') this.toggleMute();
+        else if (letter === 'n') this.toggleMusic();
         break;
 
       case 'gameover': {
@@ -302,16 +363,19 @@ export class App {
           this.startGame();
         } else if (e.key === 'Escape') {
           this.toTitle();
-        } else if (letter) {
-          const r = this.ui.overPrompt.type(letter);
-          if (r === 'complete') {
-            this.sound.uiConfirm();
-            window.setTimeout(() => this.screen === 'gameover' && this.startGame(), 180);
-          } else if (r === 'ok') this.sound.ui();
-          else this.sound.miss();
-        }
+        } else if (letter) this.menuType(this.ui.overPrompt, letter, 'gameover');
         break;
       }
     }
   };
+
+  private menuType(prompt: UI['titlePrompt'], letter: string, from: ScreenName): void {
+    const before = prompt.progress;
+    const r = prompt.type(letter);
+    if (r === 'complete') {
+      this.sound.uiConfirm();
+      window.setTimeout(() => this.screen === from && this.startGame(), 180);
+    } else if (r === 'ok') this.sound.ui(before);
+    else this.sound.miss();
+  }
 }

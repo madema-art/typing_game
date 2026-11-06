@@ -19,7 +19,7 @@ export type ScreenName = 'title' | 'playing' | 'paused' | 'gameover';
  * A word typed to trigger a menu action ("start", "again"). Purely DOM.
  */
 export class TypePrompt {
-  private progress = 0;
+  progress = 0;
   private spans: HTMLSpanElement[] = [];
   readonly word: string;
 
@@ -96,6 +96,8 @@ export class UI {
   private btnPause = $<HTMLButtonElement>('btn-pause');
   private optSound = $<HTMLButtonElement>('opt-sound');
   private optMotion = $<HTMLButtonElement>('opt-motion');
+  private optMusic = $<HTMLButtonElement>('opt-music');
+  private pauseMusic = $('pause-music');
   private pauseSound = $('pause-sound');
   private focusHint = $('focus-hint');
 
@@ -115,6 +117,9 @@ export class UI {
   onSoundToggle(fn: () => void): void {
     this.btnSound.addEventListener('click', fn);
     this.optSound.addEventListener('click', fn);
+  }
+  onMusicToggle(fn: () => void): void {
+    this.optMusic.addEventListener('click', fn);
   }
   onMotionToggle(fn: () => void): void {
     this.optMotion.addEventListener('click', fn);
@@ -149,6 +154,11 @@ export class UI {
     this.btnSound.setAttribute('aria-label', muted ? 'Unmute sound' : 'Mute sound');
     this.optSound.innerHTML = `Sound <b>${muted ? 'Off' : 'On'}</b>`;
     this.pauseSound.textContent = muted ? 'Sound off' : 'Sound on';
+  }
+
+  setMusic(on: boolean): void {
+    this.optMusic.innerHTML = `Music <b>${on ? 'On' : 'Off'}</b>`;
+    this.pauseMusic.textContent = on ? 'Music on' : 'Music off';
   }
 
   setMotion(mode: string, reduced: boolean): void {

@@ -34,10 +34,19 @@ export function glowSprite(color: string): HTMLCanvasElement {
   return c;
 }
 
+export interface Shard {
+  canvas: HTMLCanvasElement;
+  /** Offset of the shard's centroid from the ship centre (CSS px). */
+  ox: number;
+  oy: number;
+}
+
 export interface ShipSprite {
   canvas: HTMLCanvasElement;
   /** White silhouette used for hit flashes. */
   flash: HTMLCanvasElement;
+  /** The hull cut into wedge-shaped fragments for break-apart explosions. */
+  shards: Shard[];
   /** Size in CSS px (sprite is rendered at `scale` x for crispness). */
   w: number;
   h: number;
@@ -65,13 +74,46 @@ export function shipSprite(kind: EnemyKind, radius: number, dpr: number): ShipSp
   fg.fillStyle = '#ffffff';
   fg.fillRect(0, 0, fl.width, fl.height);
 
-  const sprite = { canvas: cv, flash: fl, w, h };
+  const shards = cutShards(cv, w, h, R, kind === 'heavy' ? 9 : kind === 'fighter' ? 7 : 5);
+  const sprite = { canvas: cv, flash: fl, shards, w, h };
   shipCache.set(key, sprite);
   return sprite;
 }
 
 export function clearSpriteCache(): void {
   shipCache.clear();
+}
+
+/** Slice a sprite into irregular wedges radiating from a jittered centre. */
+function cutShards(src: HTMLCanvasElement, w: number, h: number, R: number, count: number): Shard[] {
+  const angles: number[] = [];
+  for (let i = 0; i < count; i++) angles.push(((i + 0.25 + Math.random() * 0.5) / count) * Math.PI * 2);
+  const cx = (Math.random() - 0.5) * R * 0.3;
+  const cy = (Math.random() - 0.5) * R * 0.3;
+  const scale = src.width / w;
+  const out: Shard[] = [];
+  for (let i = 0; i < count; i++) {
+    const a0 = angles[i];
+    const a1 = angles[(i + 1) % count] + (i === count - 1 ? Math.PI * 2 : 0);
+    const far = R * 2.2;
+    const pts = [
+      [cx, cy],
+      [Math.cos(a0) * far, Math.sin(a0) * far],
+      [Math.cos((a0 + a1) / 2) * far * 1.1, Math.sin((a0 + a1) / 2) * far * 1.1],
+      [Math.cos(a1) * far, Math.sin(a1) * far],
+    ];
+    const [c, g] = makeCanvas(src.width, src.height);
+    g.scale(scale, scale);
+    g.translate(w / 2, h / 2);
+    g.beginPath();
+    pts.forEach(([x, y], k) => (k === 0 ? g.moveTo(x, y) : g.lineTo(x, y)));
+    g.closePath();
+    g.clip();
+    g.drawImage(src, -w / 2, -h / 2, w, h);
+    const mid = (a0 + a1) / 2;
+    out.push({ canvas: c, ox: Math.cos(mid) * R * 0.5, oy: Math.sin(mid) * R * 0.5 });
+  }
+  return out;
 }
 
 /** Ships point downward (toward the base). Engines are at the top. */

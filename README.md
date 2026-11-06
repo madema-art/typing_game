@@ -2,7 +2,11 @@
 
 An arcade survival typing game. Enemy ships descend on the Spire, your planetary defence turret. Every ship carries a word. Type it to lock on and fire one laser bolt per correct letter. Finish the word to destroy the ship. If a ship reaches the shield, the shield takes damage. When the shield fails, the run ends.
 
-Built with Vite, TypeScript, Canvas 2D, CSS and Web Audio. It has no runtime services and no external assets: sound is synthesized, ships are drawn in code, and the fonts are bundled locally.
+Built with Vite, TypeScript, Canvas 2D, CSS and Web Audio. It has no runtime services and no external assets: the music and sound are synthesized live, ships are drawn in code, and the fonts are bundled locally.
+
+### Sound
+
+The soundtrack is generated as you play: a synthwave loop in A minor with pads, arpeggios, bass and drums. It builds as the waves get harder, adds a lead melody in Overdrive, sounds a warning when the shield is low, and goes muffled while paused. Your lasers are tuned to the chord playing at that moment, so typing a word plays a short melody that fits the music. Effects are panned to where they happen on screen and pass through a generated reverb and an echo.
 
 ## Run it (Windows)
 
@@ -39,17 +43,19 @@ npm run preview
 | **Esc** | Pause or resume. The game also pauses when the window loses focus |
 | **Enter** / type `start` | Start from the title screen |
 | **Enter** / type `again` | Restart from the game-over screen (**Esc** returns to the title) |
-| **R / M / Q** while paused | Restart, mute or unmute, quit to the title |
+| **R / M / N / Q** while paused | Restart, mute or unmute everything, turn the music on or off, quit to the title |
 
-The speaker button in the bottom-right corner mutes sound at any time. The title screen also has a **Motion** option: *Auto* follows your OS reduced-motion setting, and you can also choose *Full* or *Reduced*.
+The speaker button in the bottom-right corner mutes sound at any time. The title screen also has **Music** and **Motion** options. *Auto* motion follows your OS reduced-motion setting, and you can also choose *Full* or *Reduced*.
 
 ## How it plays
 
 - **Scouts** (amber) are fast and fragile, with short words. From wave 3 they sometimes arrive in swarms.
 - **Fighters** (pink) move at standard speed and carry medium-length words.
 - **Heavies** (violet) are slow and armoured, carry long words, and do 3 damage if they get through.
+- Each correct letter fires a plasma bolt. The final letter calls down a lightning strike that shatters the ship and scatters its letters. Heavies shed one armour plate per letter.
 - A wrong letter doesn't change the word. It breaks your combo and lowers your accuracy.
-- **Combo → multiplier:** ×2 at 10 correct letters in a row, ×3 at 25, ×4 at 50 and ×5 at 80.
+- **Combo → multiplier:** ×2 at 10 correct letters in a row, ×3 at 25, ×4 at 50 and ×5 at 80. Your lasers change colour at each tier. At ×5 you enter **Overdrive**: magenta lasers, a pulsing frame and a lead melody in the soundtrack.
+- **Perfect word:** finish a word of 4+ letters without a miss for +25% points.
 - Clearing a wave earns a bonus. A *Flawless* wave (no shield damage) also repairs one shield segment, and *Perfect accuracy* earns extra points.
 - **WPM** is (correct characters ÷ 5) ÷ active typing minutes. Active time starts at your first keystroke and only counts while ships are on screen. Pauses, menus and wave breaks don't count.
 - Your 8 best runs are saved in your browser's `localStorage`.
@@ -69,11 +75,14 @@ src/
     config.ts        tuning constants
     entities.ts      Enemy / Bolt / Turret types
   render/
-    Renderer.ts      world drawing + effects (shake, flashes, ripples)
-    Background.ts    nebula, starfield, lightning, planet
+    Renderer.ts      world drawing, glow pass, lightning, shatter, Overdrive, beat-synced pulses
+    Background.ts    nebula, starfield, gas giant, storm lightning, shooting stars, planet
     Particles.ts     pooled particles + floating score text
     sprites.ts       pre-rendered ship and glow sprites
-  audio/Sound.ts     procedural Web Audio sound effects
+  audio/
+    AudioEngine.ts   Web Audio graph: limiter, reverb, echo, ducking, synth helpers
+    Music.ts         adaptive procedural soundtrack (lookahead scheduler)
+    Sound.ts         game sound effects, tuned to the music
   ui/UI.ts           DOM HUD, banners, title / pause / game-over screens
   core/              layout, math, events, settings, storage, high scores
 ```

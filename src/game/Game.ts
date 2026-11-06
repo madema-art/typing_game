@@ -12,19 +12,26 @@ export type GamePhase = 'idle' | 'playing' | 'dying' | 'over';
 export type WavePhase = 'intro' | 'combat' | 'clear';
 
 export interface GameEvents {
+  spawn: { enemy: Enemy };
   lock: { enemy: Enemy };
   release: { enemy: Enemy };
+  /** A correct letter. Non-final letters fire a travelling bolt. */
   shot: { enemy: Enemy; index: number; final: boolean; x: number; y: number; angle: number };
+  /** The final letter calls down an instant lightning strike. */
+  strike: { enemy: Enemy; x0: number; y0: number; x1: number; y1: number };
   hit: { enemy: Enemy; x: number; y: number };
-  kill: { enemy: Enemy; x: number; y: number; points: number; multiplier: number; silent: boolean };
+  kill: { enemy: Enemy; x: number; y: number; points: number; multiplier: number; silent: boolean; perfect: boolean };
   miss: { enemy: Enemy | null };
-  comboBreak: { combo: number };
+  comboBreak: { combo: number; multiplier: number };
   multiplierUp: { multiplier: number };
   baseHit: { enemy: Enemy; x: number; y: number; damage: number; integrity: number };
   waveStart: { wave: number };
   waveClear: { wave: number; bonus: number; flawless: boolean; perfect: boolean; repaired: boolean };
   gameOver: { stats: Stats; wave: number };
 }
+
+/** Points multiplier for finishing a word (length ≥ 4) without a single miss. */
+export const PERFECT_BONUS = 1.25;
 
 /**
  * Pure gameplay simulation: enemies, targeting, typing, scoring, waves.
@@ -58,6 +65,8 @@ export class Game {
   private dyingTimer = 0;
   private dyingPopTimer = 0;
   private idleTime = 0;
+  private demoSpawn = 1.5;
+  private demoType = 0;
 
   constructor(private layout: Layout) {}
 
@@ -79,13 +88,14 @@ export class Game {
     this.beginWave(1);
   }
 
-  /** Back to the attract state used behind the title screen. */
+  /** Back to the attract-mode demo that plays behind the title screen. */
   toIdle(): void {
     this.phase = 'idle';
     this.enemies = [];
     this.bolts = [];
     this.target = null;
     this.timeScale = 1;
+    this.demoSpawn = 1.2;
   }
 
   private beginWave(n: number): void {
@@ -98,6 +108,10 @@ export class Game {
     this.waveTimer = CONFIG.waveIntroTime;
     this.stats.resetWave();
     this.events.emit('waveStart', { wave: n });
+  }
+
+  get overdrive(): boolean {
+    return this.phase === 'playing' && this.stats.multiplier >= 5;
   }
 
   // ------------------------------------------------------------------ input
@@ -117,35 +131,22 @@ export class Game {
         this.registerMiss(null);
         return true;
       }
-      this.target = t;
-      t.lockT = 0;
-      this.showHint = false;
-      this.events.emit('lock', { enemy: t });
+      this.lockOn(t);
     }
 
-    const expected = t.word[t.typed];
-    if (ch !== expected) {
+    if (ch !== t.word[t.typed]) {
       this.registerMiss(t);
       return true;
     }
 
-    // Correct keystroke.
     this.stats.typingStarted = true;
     const prevMult = this.stats.multiplier;
-    t.typed++;
     this.stats.correct++;
     this.stats.waveCorrect++;
     this.stats.combo++;
     if (this.stats.combo > this.stats.maxCombo) this.stats.maxCombo = this.stats.combo;
     if (this.stats.multiplier > prevMult) this.events.emit('multiplierUp', { multiplier: this.stats.multiplier });
-
-    const final = t.typed >= t.word.length;
-    this.fire(t, final);
-    if (final) {
-      t.state = 'doomed';
-      t.doomTime = 0;
-      this.target = null;
-    }
+    this.advance(t);
     return true;
   }
 
@@ -157,15 +158,54 @@ export class Game {
     this.events.emit('release', { enemy: e });
   }
 
+  private lockOn(t: Enemy): void {
+    this.target = t;
+    t.lockT = 0;
+    this.showHint = false;
+    this.events.emit('lock', { enemy: t });
+  }
+
+  /** A correct letter on `t`: fire a bolt, or strike if the word is complete. */
+  private advance(t: Enemy): void {
+    t.typed++;
+    t.pop = 1;
+    const final = t.typed >= t.word.length;
+    this.aimAndRecoil(t);
+    const m = this.muzzle();
+    this.events.emit('shot', { enemy: t, index: t.typed - 1, final, x: m.x, y: m.y, angle: this.turret.angle });
+    if (final) {
+      this.target = null;
+      this.events.emit('strike', { enemy: t, x0: m.x, y0: m.y, x1: t.px, y1: t.py });
+      this.killEnemy(t, t.px, t.py, this.phase !== 'playing');
+    } else {
+      this.bolts.push({
+        x: m.x,
+        y: m.y,
+        trail: [m.x, m.y],
+        enemy: t,
+        final: false,
+        speed: CONFIG.boltSpeed * this.layout.k,
+        age: 0,
+        heat: t.typed / t.word.length,
+        tx: t.px,
+        ty: t.py,
+      });
+    }
+  }
+
   private registerMiss(enemy: Enemy | null): void {
     this.stats.errors++;
     this.stats.waveErrors++;
-    if (enemy) enemy.errorShake = 1;
+    if (enemy) {
+      enemy.errorShake = 1;
+      enemy.clean = false;
+    }
     this.turret.jam = 1;
     const combo = this.stats.combo;
+    const multiplier = this.stats.multiplier;
     this.stats.combo = 0;
     this.events.emit('miss', { enemy });
-    if (combo >= 3) this.events.emit('comboBreak', { combo });
+    if (combo >= 3) this.events.emit('comboBreak', { combo, multiplier });
   }
 
   private hasTargetable(): boolean {
@@ -189,7 +229,7 @@ export class Game {
 
   // ------------------------------------------------------------------ combat
 
-  private muzzle(): { x: number; y: number } {
+  muzzle(): { x: number; y: number } {
     const L = this.layout;
     const len = 46 * L.k;
     return {
@@ -198,25 +238,12 @@ export class Game {
     };
   }
 
-  private fire(enemy: Enemy, final: boolean): void {
-    // Snap the barrel toward the target so the bolt visibly leaves the muzzle in the right direction.
-    const desired = this.aimAngle(enemy);
-    this.turret.angle = approach(this.turret.angle, desired, 60, 0.05);
+  private aimAndRecoil(enemy: Enemy): void {
+    // Snap the barrel toward the target so shots visibly leave the muzzle in the right direction.
+    this.turret.angle = approach(this.turret.angle, this.aimAngle(enemy), 60, 0.05);
     this.turret.recoil = 1;
     this.turret.flash = 1;
     this.turret.heat = Math.min(1, this.turret.heat + 0.07);
-    const m = this.muzzle();
-    this.bolts.push({
-      x: m.x,
-      y: m.y,
-      trail: [m.x, m.y],
-      enemy,
-      final,
-      speed: CONFIG.boltSpeed * this.layout.k,
-      age: 0,
-      heat: enemy.typed / enemy.word.length,
-    });
-    this.events.emit('shot', { enemy, index: enemy.typed - 1, final, x: m.x, y: m.y, angle: this.turret.angle });
   }
 
   private aimAngle(e: Enemy): number {
@@ -225,10 +252,10 @@ export class Game {
     return clamp(a, -1.35, 1.35);
   }
 
-  private spawnEnemy(kind: EnemyKind): boolean {
+  private spawnEnemy(kind: EnemyKind, lanes?: Array<[number, number]>): boolean {
     const L = this.layout;
     const def = ENEMY_DEFS[kind];
-    const [minLen, maxLen] = def.wordLen(this.wave);
+    const [minLen, maxLen] = def.wordLen(Math.max(1, this.wave));
 
     // Avoid starting letters that are currently "next" on any living enemy.
     const avoid = new Set<string>();
@@ -237,12 +264,13 @@ export class Game {
     const word = this.words.pick(minLen, maxLen, avoid);
     const r = def.radius * L.k;
     const labelW = L.labelWidth(word.length);
-    const nx = this.findSpawnX(labelW, r);
+    const nx = this.findSpawnX(labelW, r, lanes);
     if (nx === null) {
       this.words.unpickLast();
       return false;
     }
-    const speed = (this.params.speedMul / def.travelTime) * rand(0.94, 1.06);
+    const speedMul = this.phase === 'idle' ? 1.1 : this.params.speedMul;
+    const speed = (speedMul / def.travelTime) * rand(0.94, 1.06);
     const e: Enemy = {
       id: this.nextId++,
       def,
@@ -255,6 +283,7 @@ export class Game {
       phase: Math.random() * Math.PI * 2,
       state: 'alive',
       doomTime: 0,
+      clean: true,
       px: 0,
       py: 0,
       lx: 0,
@@ -265,14 +294,16 @@ export class Game {
       errorShake: 0,
       lockT: 0,
       spawnT: 0,
+      pop: 0,
     };
     this.place(e);
     this.enemies.push(e);
+    this.events.emit('spawn', { enemy: e });
     return true;
   }
 
   /** Choose a lane whose label won't collide with ships still near the top. */
-  private findSpawnX(labelW: number, r: number): number | null {
+  private findSpawnX(labelW: number, r: number, lanes?: Array<[number, number]>): number | null {
     const L = this.layout;
     const half = Math.max(labelW / 2, r) + 10;
     const minX = (half + 8) / L.fieldW;
@@ -282,7 +313,13 @@ export class Game {
     let bestNx = 0.5;
     let bestGap = -Infinity;
     for (let i = 0; i < 18; i++) {
-      const nx = rand(minX, maxX);
+      let nx: number;
+      if (lanes) {
+        const [a, b] = lanes[i % lanes.length];
+        nx = clamp(rand(a, b), minX, maxX);
+      } else {
+        nx = rand(minX, maxX);
+      }
       const x = L.fx(nx);
       let minGap = Infinity;
       for (const e of this.enemies) {
@@ -361,6 +398,9 @@ export class Game {
 
     if (this.phase === 'idle') {
       this.idleTime += dt;
+      this.updateDemo(dt);
+      this.updateEnemies(dt);
+      this.updateBolts(dt);
       return;
     }
     if (this.phase === 'over') {
@@ -380,6 +420,32 @@ export class Game {
 
     this.updateEnemies(dt);
     this.updateBolts(dt);
+  }
+
+  /** Attract mode: a few ships drift down the sides and the turret types them out on its own. */
+  private updateDemo(dt: number): void {
+    this.demoSpawn -= dt;
+    if (this.demoSpawn <= 0) {
+      this.demoSpawn = rand(1.8, 3.2);
+      if (this.enemies.length < 3) {
+        const kind: EnemyKind = weighted({ scout: 0.55, fighter: 0.45 });
+        this.spawnEnemy(kind, [
+          [0.01, 0.09],
+          [0.91, 0.99],
+        ]);
+      }
+    }
+    this.demoType -= dt;
+    if (this.demoType > 0) return;
+    this.demoType = rand(0.09, 0.17);
+    let t = this.target;
+    if (!t || t.state !== 'alive') {
+      t = null;
+      for (const e of this.enemies) if (e.state === 'alive' && e.progress > 0.38 && (!t || e.progress > t.progress)) t = e;
+      if (!t) return;
+      this.lockOn(t);
+    }
+    this.advance(t);
   }
 
   private updateWave(dt: number): void {
@@ -403,9 +469,7 @@ export class Game {
       if (alive === 0 && this.spawnTimer > 0.6) this.spawnTimer = 0.6;
       if (this.spawnTimer <= 0 && alive < p.maxAlive) {
         let kind: EnemyKind = weighted(p.weights);
-        if (this.swarmQueue.length) {
-          kind = 'scout';
-        }
+        if (this.swarmQueue.length) kind = 'scout';
         if (this.spawnEnemy(kind)) {
           this.spawned++;
           if (this.swarmQueue.length) {
@@ -453,12 +517,8 @@ export class Game {
       e.hitFlash = Math.max(0, e.hitFlash - dt * 6);
       e.errorShake = Math.max(0, e.errorShake - dt * 4);
       e.lockT = Math.min(1, e.lockT + dt * 5);
-      if (e.state === 'alive') {
-        e.progress += e.speed * dt;
-      } else if (e.state === 'doomed') {
-        e.doomTime += dt;
-        if (e.doomTime > 1.2) this.killEnemy(e, e.px, e.py);
-      }
+      e.pop = Math.max(0, e.pop - dt * 7);
+      if (e.state === 'alive') e.progress += e.speed * dt;
       this.place(e);
     }
 
@@ -476,13 +536,17 @@ export class Game {
       this.target = null;
       this.events.emit('release', { enemy: e });
     }
-    if (this.phase !== 'playing') return;
+    if (this.phase !== 'playing') {
+      this.events.emit('kill', { enemy: e, x: e.px, y: e.py, points: 0, multiplier: 1, silent: true, perfect: false });
+      return;
+    }
     const damage = e.def.damage;
     this.integrity = Math.max(0, this.integrity - damage);
     this.stats.waveDamage += damage;
     const combo = this.stats.combo;
+    const multiplier = this.stats.multiplier;
     this.stats.combo = 0;
-    if (combo >= 3) this.events.emit('comboBreak', { combo });
+    if (combo >= 3) this.events.emit('comboBreak', { combo, multiplier });
     this.events.emit('baseHit', {
       enemy: e,
       x: e.px,
@@ -498,13 +562,14 @@ export class Game {
     e.state = 'dead';
     let points = 0;
     const mult = this.stats.multiplier;
+    const perfect = !silent && e.clean && e.word.length >= 4;
     if (!silent && this.phase === 'playing') {
-      points = (e.def.basePoints + e.word.length * 10) * mult;
+      points = Math.round((e.def.basePoints + e.word.length * 10) * mult * (perfect ? PERFECT_BONUS : 1));
       this.stats.score += points;
       this.stats.kills++;
     }
     if (this.target === e) this.target = null;
-    this.events.emit('kill', { enemy: e, x, y, points, multiplier: mult, silent });
+    this.events.emit('kill', { enemy: e, x, y, points, multiplier: mult, silent, perfect });
   }
 
   private updateBolts(dt: number): void {
@@ -512,28 +577,21 @@ export class Game {
     for (const b of this.bolts) {
       b.age += dt;
       const e = b.enemy;
-      const tx = e.px;
-      const ty = e.py;
-      const dx = tx - b.x;
-      const dy = ty - b.y;
+      // Track the target while it lives; otherwise fly to where it died.
+      if (e.state !== 'dead') {
+        b.tx = e.px;
+        b.ty = e.py;
+      }
+      const dx = b.tx - b.x;
+      const dy = b.ty - b.y;
       const dist = Math.hypot(dx, dy);
       const step = b.speed * dt;
-      if (e.state === 'dead') {
-        // Target vanished: let the bolt fade out along its path.
-        if (b.age > 0.4) continue;
-        b.x += (dx / (dist || 1)) * step * 0.2;
-        b.y += (dy / (dist || 1)) * step * 0.2;
-        keep.push(b);
-        continue;
-      }
       if (dist <= step + e.r * 0.4) {
-        if (b.final) {
-          this.killEnemy(e, tx, ty);
-        } else {
+        if (e.state === 'alive') {
           e.hitFlash = 1;
-          if (e.state === 'alive') e.progress = Math.max(0, e.progress - e.def.knockback);
-          this.events.emit('hit', { enemy: e, x: tx - (dx / (dist || 1)) * e.r * 0.5, y: ty - (dy / (dist || 1)) * e.r * 0.5 });
+          e.progress = Math.max(0, e.progress - e.def.knockback);
         }
+        this.events.emit('hit', { enemy: e, x: b.tx - (dx / (dist || 1)) * e.r * 0.5, y: b.ty - (dy / (dist || 1)) * e.r * 0.5 });
         continue;
       }
       b.x += (dx / dist) * step;

@@ -1,7 +1,7 @@
 import { TAU, rand } from '../core/math';
 import { glowSprite } from './sprites';
 
-export type ParticleKind = 'spark' | 'glow' | 'debris' | 'smoke' | 'ring' | 'ember';
+export type ParticleKind = 'spark' | 'glow' | 'debris' | 'smoke' | 'ring' | 'ember' | 'shard' | 'glyph';
 
 export interface Particle {
   kind: ParticleKind;
@@ -17,11 +17,20 @@ export interface Particle {
   gravity: number;
   rot: number;
   vr: number;
+  /** Shard image (kind 'shard'). */
+  img: HTMLCanvasElement | null;
+  ox: number;
+  oy: number;
+  w: number;
+  h: number;
+  /** Character (kind 'glyph'). */
+  ch: string;
 }
 
 export interface FloatText {
   text: string;
   sub?: string;
+  subColor?: string;
   x: number;
   y: number;
   life: number;
@@ -30,15 +39,19 @@ export interface FloatText {
   size: number;
 }
 
-const MAX_PARTICLES = 1400;
+const MAX_PARTICLES = 1800;
 
-/** Simple pooled particle system with additive glow rendering. */
+/**
+ * Pooled particle system. Drawing is split in two passes so the renderer can
+ * send the light-emitting pass to the bloom buffer as well.
+ */
 export class Particles {
   list: Particle[] = [];
   texts: FloatText[] = [];
   private pool: Particle[] = [];
   /** 0..1 multiplier on particle counts (reduced motion lowers it). */
   density = 1;
+  glyphFont = '700 20px monospace';
 
   clear(): void {
     this.pool.push(...this.list);
@@ -61,6 +74,12 @@ export class Particles {
     o.gravity = p.gravity ?? 0;
     o.rot = p.rot ?? Math.random() * TAU;
     o.vr = p.vr ?? 0;
+    o.img = p.img ?? null;
+    o.ox = p.ox ?? 0;
+    o.oy = p.oy ?? 0;
+    o.w = p.w ?? 0;
+    o.h = p.h ?? 0;
+    o.ch = p.ch ?? '';
     this.list.push(o);
   }
 
@@ -120,34 +139,65 @@ export class Particles {
     this.texts = this.texts.filter((t) => t.life > 0);
   }
 
-  draw(g: CanvasRenderingContext2D): void {
-    // Smoke first (normal blending), then additive light.
+  /** Non-emissive particles: smoke, debris, hull shards, flying letters. */
+  drawSolid(g: CanvasRenderingContext2D): void {
     for (const p of this.list) {
-      if (p.kind !== 'smoke' && p.kind !== 'debris') continue;
       const t = p.life / p.max;
-      if (p.kind === 'smoke') {
-        g.globalAlpha = t * 0.35;
-        g.fillStyle = p.color;
-        g.beginPath();
-        g.arc(p.x, p.y, p.size * (1.8 - t), 0, TAU);
-        g.fill();
-      } else {
-        g.globalAlpha = Math.min(1, t * 2);
-        g.save();
-        g.translate(p.x, p.y);
-        g.rotate(p.rot);
-        g.fillStyle = p.color;
-        g.beginPath();
-        g.moveTo(-p.size, -p.size * 0.6);
-        g.lineTo(p.size, 0);
-        g.lineTo(-p.size * 0.4, p.size * 0.7);
-        g.closePath();
-        g.fill();
-        g.restore();
+      switch (p.kind) {
+        case 'smoke':
+          g.globalAlpha = t * 0.35;
+          g.fillStyle = p.color;
+          g.beginPath();
+          g.arc(p.x, p.y, p.size * (1.8 - t), 0, TAU);
+          g.fill();
+          break;
+        case 'debris':
+          g.globalAlpha = Math.min(1, t * 2);
+          g.save();
+          g.translate(p.x, p.y);
+          g.rotate(p.rot);
+          g.fillStyle = p.color;
+          g.beginPath();
+          g.moveTo(-p.size, -p.size * 0.6);
+          g.lineTo(p.size, 0);
+          g.lineTo(-p.size * 0.4, p.size * 0.7);
+          g.closePath();
+          g.fill();
+          g.restore();
+          break;
+        case 'shard':
+          if (!p.img) break;
+          g.globalAlpha = Math.min(1, t * 1.8);
+          g.save();
+          g.translate(p.x, p.y);
+          g.rotate(p.rot);
+          g.drawImage(p.img, -p.w / 2 - p.ox, -p.h / 2 - p.oy, p.w, p.h);
+          g.restore();
+          break;
+        case 'glyph': {
+          g.globalAlpha = Math.min(1, t * 1.6);
+          g.save();
+          g.translate(p.x, p.y);
+          g.rotate(p.rot);
+          const s = 1 + (1 - t) * 0.6;
+          g.scale(s, s);
+          g.font = this.glyphFont;
+          g.textAlign = 'center';
+          g.textBaseline = 'middle';
+          g.fillStyle = t > 0.7 ? '#ffffff' : p.color;
+          g.fillText(p.ch, 0, 0);
+          g.restore();
+          break;
+        }
+        default:
+          break;
       }
     }
     g.globalAlpha = 1;
+  }
 
+  /** Emissive particles, drawn additively. Safe to call on the bloom buffer too. */
+  drawLight(g: CanvasRenderingContext2D, bloom = false): void {
     g.globalCompositeOperation = 'lighter';
     for (const p of this.list) {
       const t = p.life / p.max;
@@ -157,7 +207,7 @@ export class Particles {
           const len = p.kind === 'spark' ? 0.035 : 0.02;
           g.strokeStyle = p.color;
           g.globalAlpha = Math.min(1, t * 1.6);
-          g.lineWidth = p.size * (0.5 + t * 0.6);
+          g.lineWidth = p.size * (0.5 + t * 0.6) * (bloom ? 2 : 1);
           g.beginPath();
           g.moveTo(p.x, p.y);
           g.lineTo(p.x - p.vx * len, p.y - p.vy * len);
@@ -175,17 +225,26 @@ export class Particles {
           const r = p.size * (0.15 + 0.85 * (1 - Math.pow(1 - prog, 3)));
           g.globalAlpha = t * t;
           g.strokeStyle = p.color;
-          g.lineWidth = 1 + 5 * t;
+          g.lineWidth = (1 + 5 * t) * (bloom ? 2 : 1);
           g.beginPath();
           g.arc(p.x, p.y, r, 0, TAU);
           g.stroke();
           break;
         }
-        case 'debris': {
-          // hot edge glow on debris
-          g.globalAlpha = t * 0.5;
-          const s = p.size * 2.5;
-          g.drawImage(glowSprite(p.color), p.x - s, p.y - s, s * 2, s * 2);
+        case 'debris':
+        case 'shard': {
+          // hot, cooling edge glow
+          const heat = Math.max(0, t - 0.35) / 0.65;
+          if (heat <= 0) break;
+          g.globalAlpha = heat * (p.kind === 'shard' ? 0.7 : 0.5);
+          const s = p.kind === 'shard' ? p.w * 0.35 : p.size * 2.5;
+          g.drawImage(glowSprite(p.kind === 'shard' ? '#ffb27a' : p.color), p.x - s, p.y - s, s * 2, s * 2);
+          break;
+        }
+        case 'glyph': {
+          if (!bloom) break;
+          g.globalAlpha = t;
+          g.drawImage(glowSprite(p.color), p.x - 14, p.y - 14, 28, 28);
           break;
         }
         default:
@@ -210,18 +269,31 @@ export class Particles {
       g.scale(scale, scale);
       g.font = `800 ${t.size}px ${font}`;
       g.lineWidth = 4;
+      g.lineJoin = 'round';
       g.strokeStyle = 'rgba(4,5,14,0.85)';
       g.strokeText(t.text, 0, 0);
       g.fillStyle = t.color;
       g.fillText(t.text, 0, 0);
       if (t.sub) {
-        g.font = `700 ${Math.round(t.size * 0.55)}px ${font}`;
+        g.font = `700 ${Math.round(t.size * 0.5)}px ${font}`;
         g.strokeText(t.sub, 0, t.size * 0.85);
-        g.fillStyle = '#ffffff';
+        g.fillStyle = t.subColor ?? '#ffffff';
         g.fillText(t.sub, 0, t.size * 0.85);
       }
       g.restore();
     }
     g.globalAlpha = 1;
+  }
+
+  /** Bloom halo for floating texts. */
+  drawTextGlow(g: CanvasRenderingContext2D): void {
+    g.globalCompositeOperation = 'lighter';
+    for (const t of this.texts) {
+      g.globalAlpha = Math.min(1, t.life * 2.5) * 0.5;
+      const w = t.size * 2.2;
+      g.drawImage(glowSprite(t.color), t.x - w, t.y - t.size, w * 2, t.size * 2);
+    }
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'source-over';
   }
 }

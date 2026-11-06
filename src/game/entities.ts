@@ -19,6 +19,8 @@ export interface Enemy {
   state: EnemyState;
   /** Seconds since the final letter was typed (safety net for the kill bolt). */
   doomTime: number;
+  /** True until the player mistypes while locked onto this ship (perfect-word bonus). */
+  clean: boolean;
 
   // --- derived each frame (pixels) ---
   px: number;
@@ -34,6 +36,8 @@ export interface Enemy {
   errorShake: number;
   lockT: number;
   spawnT: number;
+  /** Pop animation for the most recently typed letter. */
+  pop: number;
 }
 
 export interface Bolt {
@@ -47,6 +51,9 @@ export interface Bolt {
   age: number;
   /** 0..1, used to vary colour along a word. */
   heat: number;
+  /** Last known target position (bolts finish their flight even if the target dies). */
+  tx: number;
+  ty: number;
 }
 
 export interface TurretState {
