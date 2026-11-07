@@ -151,11 +151,12 @@ export class Renderer {
       const L = this.layout;
       const heavy = e.def.kind === 'heavy';
       const x = e.px;
-      const y = 4;
-      P.spawn({ kind: 'glow', x, y, color: e.def.color, size: heavy ? 90 : 46, max: heavy ? 0.7 : 0.4 });
-      P.spawn({ kind: 'ring', x, y, color: e.def.color, size: (heavy ? 120 : 60) * L.k, max: 0.5 });
-      P.spray(x, y, Math.PI / 2, 1.2, e.def.color, heavy ? 16 : 7, 380, { size: 1.4 });
-      if (heavy) this.shake(0.12);
+      const y = e.py;
+      const color = e.vocab ? GOLD : e.def.color;
+      P.spawn({ kind: 'glow', x, y: L.bandY, color: '#ffffff', size: 40, max: 0.2 });
+      P.spawn({ kind: 'glow', x, y, color, size: heavy ? 90 : 46, max: heavy ? 0.7 : 0.4 });
+      P.spawn({ kind: 'ring', x, y, color, size: (heavy ? 120 : 60) * L.k, max: 0.5 });
+      P.spray(x, L.bandY, Math.PI / 2, 1.2, color, heavy ? 12 : 6, 300, { size: 1.4 });
     });
 
     ev.on('shot', ({ enemy: e, index, x, y, angle, final }) => {
@@ -442,7 +443,7 @@ export class Renderer {
     this.drawTurret(g);
     this.drawTether(g);
     this.drawBolts(g, false);
-    for (const e of game.enemies) this.drawShip(g, e);
+    for (const e of game.enemies) if (e.progress >= 0) this.drawShip(g, e);
     this.drawStrikes(g, false);
     this.particles.drawSolid(g);
     this.particles.drawLight(g);
@@ -537,6 +538,7 @@ export class Renderer {
 
     // Ship engines
     for (const e of game.enemies) {
+      if (e.progress < 0) continue;
       b.globalAlpha = e.spawnT * 0.8;
       const s = e.r * 1.4;
       b.drawImage(glowSprite(e.def.color), e.px - s, e.py - e.r * 1.4 - s * 0.5, s * 2, s * 1.6);
@@ -557,7 +559,7 @@ export class Renderer {
     b.textBaseline = 'middle';
     b.textAlign = 'left';
     for (const e of game.enemies) {
-      if (e.typed === 0) continue;
+      if (e.typed === 0 || e.progress < 0) continue;
       const locked = e === game.target;
       b.globalAlpha = locked ? 1 : 0.5;
       b.fillStyle = CYAN;
@@ -879,7 +881,7 @@ export class Renderer {
 
   private drawTether(g: CanvasRenderingContext2D): void {
     const e = this.game.target;
-    if (!e || e.state !== 'alive') return;
+    if (!e || e.state !== 'alive' || e.progress < 0) return;
     const m = this.game.muzzle();
     g.save();
     g.setLineDash([3, 9]);
@@ -970,7 +972,7 @@ export class Renderer {
     const rate = this.reducedMotion ? 10 : this.quality === 'low' ? 16 : 34;
     const alive = new Set<number>();
     for (const e of this.game.enemies) {
-      if (e.state !== 'alive') continue;
+      if (e.state !== 'alive' || e.progress < 0) continue;
       alive.add(e.id);
       let acc = (this.trailAcc.get(e.id) ?? 0) + dt * rate;
       const offs = this.engineOffsets(e);
@@ -1091,8 +1093,8 @@ export class Renderer {
     g.textAlign = 'left';
     const demo = this.game.phase === 'idle';
     g.globalAlpha = 1;
-    for (const e of this.game.enemies) if (e !== target) this.drawLabel(g, e, false, demo);
-    if (target && target.state !== 'dead') this.drawLabel(g, target, true, demo);
+    for (const e of this.game.enemies) if (e !== target && e.progress >= 0) this.drawLabel(g, e, false, demo);
+    if (target && target.state !== 'dead' && target.progress >= 0) this.drawLabel(g, target, true, demo);
   }
 
   private drawLabel(g: CanvasRenderingContext2D, e: Enemy, locked: boolean, demo: boolean): void {
@@ -1125,11 +1127,38 @@ export class Renderer {
     g.fill();
     let border = rgba(e.def.color, 0.6);
     if (danger > 0 && !locked) border = rgba(mixHex(e.def.color, ERROR, danger), 0.6 + 0.4 * danger * (0.5 + 0.5 * Math.sin(this.time * 10)));
-    if (locked) border = CYAN;
+    if (e.vocab) border = rgba(GOLD, 0.95);
+    if (locked) border = e.vocab ? GOLD : CYAN;
     if (e.errorShake > 0.05) border = mixHex(locked ? CYAN : e.def.color, ERROR, e.errorShake);
     g.strokeStyle = border;
-    g.lineWidth = locked ? 2 : 1.25;
+    g.lineWidth = locked || e.vocab ? 2 : 1.25;
     g.stroke();
+    if (e.vocab) {
+      // Lexicon words: gold frame, a soft halo and a tag underneath.
+      g.globalCompositeOperation = 'lighter';
+      g.globalAlpha = baseAlpha * (0.25 + 0.1 * Math.sin(this.time * 3));
+      g.drawImage(glowSprite(GOLD), -w * 0.75, -h * 1.3, w * 1.5, h * 2.6);
+      g.globalCompositeOperation = 'source-over';
+      g.globalAlpha = baseAlpha;
+      g.font = `700 ${Math.round(L.labelFont * 0.48)}px ${FONT_DISPLAY}`;
+      g.textAlign = 'center';
+      g.fillStyle = GOLD;
+      g.fillText('LEXICON', 0, h / 2 + L.labelFont * 0.55);
+      g.textAlign = 'left';
+      g.font = `700 ${L.labelFont}px ${FONT_MONO}`;
+    }
+    if (locked && this.game.awaitingSpace && this.game.phase === 'playing') {
+      // The next keystroke is the space before this word.
+      const blink = this.reducedMotion ? 1 : 0.55 + 0.45 * Math.sin(this.time * 9);
+      g.globalAlpha = baseAlpha * blink;
+      g.font = `700 ${Math.round(L.labelFont * 0.55)}px ${FONT_DISPLAY}`;
+      g.textAlign = 'right';
+      g.fillStyle = CYAN;
+      g.fillText('SPACE \u2192', -w / 2 - 8, 1);
+      g.textAlign = 'left';
+      g.font = `700 ${L.labelFont}px ${FONT_MONO}`;
+      g.globalAlpha = baseAlpha;
+    }
 
     // Typed part: cyan; the newest letter pops. Remaining: bright white.
     const cw = L.charW;
@@ -1207,7 +1236,7 @@ export class Renderer {
   private drawHint(g: CanvasRenderingContext2D): void {
     const game = this.game;
     if (game.phase !== 'playing' || !game.showHint || game.wave !== 1 || game.wavePhase !== 'combat') return;
-    if (!game.enemies.some((e) => e.ly > 0)) return;
+    if (!game.enemies.some((e) => e.progress >= 0)) return;
     const L = this.layout;
     const a = this.reducedMotion ? 0.9 : 0.6 + 0.4 * Math.sin(this.time * 3);
     g.save();
@@ -1216,7 +1245,7 @@ export class Renderer {
     g.textBaseline = 'middle';
     g.font = `600 ${Math.round(14 * L.k + 2)}px ${FONT_DISPLAY}`;
     g.fillStyle = CYAN;
-    g.fillText('TYPE A SHIP’S WORD TO FIRE', L.cx, L.shieldApexY + 34 * L.k);
+    g.fillText('TYPE THE TRANSMISSION · CAPITALS, PUNCTUATION AND SPACES COUNT', L.cx, L.shieldApexY + 34 * L.k);
     g.restore();
   }
 

@@ -12,6 +12,15 @@ export class Stats {
   activeTime = 0;
   typingStarted = false;
 
+  // sentences & streaks
+  sentences = 0;
+  perfectSentences = 0;
+  perfectStreak = 0;
+  bestPerfectStreak = 0;
+  wordsMissed = 0;
+  /** Lexicon words met this run. */
+  vocab: string[] = [];
+
   // per-wave counters
   waveCorrect = 0;
   waveErrors = 0;

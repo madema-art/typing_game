@@ -13,7 +13,7 @@ const SPEAKER_ON =
 const SPEAKER_OFF =
   '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16 9l6 6M22 9l-6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>';
 
-export type ScreenName = 'title' | 'playing' | 'paused' | 'gameover';
+export type ScreenName = 'title' | 'playing' | 'paused' | 'gameover' | 'lexicon';
 
 /**
  * A word typed to trigger a menu action ("start", "again"). Purely DOM.
@@ -78,6 +78,7 @@ export class UI {
     title: $('screen-title'),
     paused: $('screen-pause'),
     gameover: $('screen-over'),
+    lexicon: $('screen-lexicon'),
   };
   private hud = $('hud');
   private hudBlocks = Array.from(document.querySelectorAll<HTMLElement>('.hud-block'));
@@ -100,9 +101,10 @@ export class UI {
   private pauseMusic = $('pause-music');
   private pauseSound = $('pause-sound');
   private focusHint = $('focus-hint');
+  private hudStreak = $('hud-streak');
 
   private shownScore = 0;
-  private last = { mult: 0, wave: -1, integrity: -1, wpm: '', acc: '', bar: '' };
+  private last = { mult: 0, wave: -1, integrity: -1, wpm: '', acc: '', bar: '', streak: -1 };
   private wpmTimer = 0;
 
   constructor() {
@@ -127,6 +129,11 @@ export class UI {
   onPauseClick(fn: () => void): void {
     this.btnPause.addEventListener('click', fn);
   }
+  onLexicon(open: () => void, close: () => void, reset: () => void): void {
+    $('opt-lexicon').addEventListener('click', open);
+    $('lexicon-close').addEventListener('click', close);
+    $('profile-reset').addEventListener('click', reset);
+  }
   onPauseMenu(fn: (action: string) => void): void {
     for (const b of this.screens.paused.querySelectorAll<HTMLButtonElement>('[data-action]')) {
       b.addEventListener('click', () => fn(b.dataset.action!));
@@ -137,6 +144,7 @@ export class UI {
     this.screens.title.classList.toggle('visible', screen === 'title');
     this.screens.paused.classList.toggle('visible', screen === 'paused');
     this.screens.gameover.classList.toggle('visible', screen === 'gameover');
+    this.screens.lexicon.classList.toggle('visible', screen === 'lexicon');
     this.hud.classList.toggle('visible', screen === 'playing' || screen === 'paused');
     this.btnPause.classList.toggle('hidden', screen !== 'playing');
     if (screen === 'title') this.titlePrompt.reset();
@@ -171,7 +179,7 @@ export class UI {
 
   resetHud(): void {
     this.shownScore = 0;
-    this.last = { mult: 0, wave: -1, integrity: -1, wpm: '', acc: '', bar: '' };
+    this.last = { mult: 0, wave: -1, integrity: -1, wpm: '', acc: '', bar: '', streak: -1 };
     this.wpmTimer = 0;
   }
 
@@ -183,7 +191,7 @@ export class UI {
       const r = rects[i];
       let covered = false;
       for (const e of game.enemies) {
-        if (e.state === 'dead') continue;
+        if (e.state === 'dead' || e.progress < 0) continue;
         const top = Math.min(e.py - e.r, e.ly);
         const bottom = e.ly + 40;
         const half = Math.max(e.labelW / 2, e.r) + 12;
@@ -223,8 +231,7 @@ export class UI {
       this.last.wave = game.wave;
       this.hudWave.textContent = String(game.wave);
     }
-    const done = game.waveTotal ? 1 - game.waveRemaining / game.waveTotal : 0;
-    const bar = `${Math.round(done * 100)}%`;
+    const bar = `${Math.round(game.waveProgress * 100)}%`;
     if (bar !== this.last.bar) {
       this.last.bar = bar;
       this.hudWaveBar.style.width = bar;
@@ -237,6 +244,18 @@ export class UI {
       const acc = String(Math.round(s.accuracy * 100));
       if (wpm !== this.last.wpm) this.hudWpm.textContent = this.last.wpm = wpm;
       if (acc !== this.last.acc) this.hudAcc.textContent = this.last.acc = acc;
+    }
+
+    if (s.perfectStreak !== this.last.streak) {
+      const up = s.perfectStreak > this.last.streak && this.last.streak !== -1;
+      this.last.streak = s.perfectStreak;
+      this.hudStreak.querySelector('b')!.textContent = String(s.perfectStreak);
+      this.hudStreak.classList.toggle('hot', s.perfectStreak >= 3);
+      if (up) {
+        this.hudStreak.classList.remove('bump');
+        void this.hudStreak.offsetWidth;
+        this.hudStreak.classList.add('bump');
+      }
     }
 
     if (game.integrity !== this.last.integrity) {
@@ -291,7 +310,8 @@ export class UI {
     $('over-acc').textContent = `${s.correct + s.errors === 0 ? 0 : Math.round(s.accuracy * 100)}%`;
     $('over-combo').textContent = String(s.maxCombo);
     $('over-wave').textContent = String(game.wave);
-    $('over-kills').textContent = String(s.kills);
+    $('over-streak').textContent = String(s.bestPerfectStreak);
+    $('over-words').textContent = String(s.vocab.length);
     $('over-best').classList.toggle('visible', rank === 0);
     this.renderScores($('over-scores'), list.slice(0, 5), rank);
   }

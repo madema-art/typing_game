@@ -1,44 +1,58 @@
 import { Emitter } from '../core/events';
 import type { Layout } from '../core/layout';
-import { approach, clamp, rand, weighted } from '../core/math';
+import { approach, clamp, rand } from '../core/math';
+import { Coach, type CoachMessage } from './coach';
 import { CONFIG } from './config';
 import { waveParams, type WaveParams } from './director';
 import { ENEMY_DEFS, type EnemyKind } from './enemyTypes';
 import type { Bolt, Enemy, TurretState } from './entities';
+import { Picker } from './picker';
+import type { Profile, VocabState } from './profile';
 import { Stats } from './stats';
-import { WordPicker } from './words';
+import type { Passage } from './text/passage';
+import type { VocabEntry } from './text/vocab';
 
 export type GamePhase = 'idle' | 'playing' | 'dying' | 'over';
 export type WavePhase = 'intro' | 'combat' | 'clear';
 
 export interface GameEvents {
+  /** A ship materialized out of the transmission bar. */
   spawn: { enemy: Enemy };
   lock: { enemy: Enemy };
-  release: { enemy: Enemy };
-  /** A correct letter. Non-final letters fire a travelling bolt. */
+  /** A correct letter (not a space). Non-final letters fire a travelling bolt. */
   shot: { enemy: Enemy; index: number; final: boolean; x: number; y: number; angle: number };
-  /** The final letter calls down an instant lightning strike. */
+  /** The final letter of a word calls down an instant lightning strike. */
   strike: { enemy: Enemy; x0: number; y0: number; x1: number; y1: number };
+  space: { next: Enemy | null };
   hit: { enemy: Enemy; x: number; y: number };
   kill: { enemy: Enemy; x: number; y: number; points: number; multiplier: number; silent: boolean; perfect: boolean };
-  miss: { enemy: Enemy | null };
+  miss: { enemy: Enemy | null; expected: string; typed: string };
   comboBreak: { combo: number; multiplier: number };
   multiplierUp: { multiplier: number };
   baseHit: { enemy: Enemy; x: number; y: number; damage: number; integrity: number };
+  passageStart: { passage: Passage; index: number; total: number };
+  sentenceDone: { perfect: boolean; streak: number };
+  passageComplete: { perfect: boolean; bonus: number; wpm: number; crashed: number };
+  vocab: { entry: VocabEntry; isNew: boolean; clean: boolean; state: VocabState };
+  coach: CoachMessage;
   waveStart: { wave: number };
   waveClear: { wave: number; bonus: number; flawless: boolean; perfect: boolean; repaired: boolean };
   gameOver: { stats: Stats; wave: number };
 }
 
-/** Points multiplier for finishing a word (length ≥ 4) without a single miss. */
+/** Points multiplier for finishing a word (length >= 4) without a single miss. */
 export const PERFECT_BONUS = 1.25;
+const BASE_POINTS: Record<EnemyKind, number> = { scout: 60, fighter: 100, heavy: 160 };
 
 /**
- * Pure gameplay simulation: enemies, targeting, typing, scoring, waves.
- * Rendering and audio listen to `events`; nothing here touches the DOM.
+ * Gameplay simulation. Each transmission (one to three sentences) arrives as a
+ * convoy: one ship per word, staggered by the player's measured typing speed so
+ * the next word needed is always the closest. Nothing here touches the DOM.
  */
 export class Game {
   readonly events = new Emitter<GameEvents>();
+  readonly coach: Coach;
+  readonly picker: Picker;
   phase: GamePhase = 'idle';
   wavePhase: WavePhase = 'intro';
   wave = 0;
@@ -49,26 +63,50 @@ export class Game {
   bolts: Bolt[] = [];
   target: Enemy | null = null;
   turret: TurretState = { angle: 0, recoil: 0, flash: 0, heat: 0, jam: 0, power: 0 };
-  /** Seconds of simulated time since the run started. */
   time = 0;
-  /** Tutorial hint shown until the first lock in a run. */
   showHint = true;
-  /** Time scale (slow motion during the game-over sequence). */
   timeScale = 1;
 
+  // ---- transmission state (read by the UI) ----
+  passage: Passage | null = null;
+  cursor = 0;
+  /** Index of the word being typed (or next to type). */
+  tokenIdx = 0;
+  /** True when the next expected character is the space before the next word. */
+  awaitingSpace = false;
+  readonly crashed = new Set<number>();
+  /** Bumps whenever the transmission changes in a way the teleprompter must redraw. */
+  revision = 0;
+  /** Adaptive pace multiplier (higher = more room between words). */
+  pace = 1;
+
+  private ships: Array<Enemy | null> = [];
+  private partErrors: number[] = [];
+  private partCrashed: boolean[] = [];
+  private partsDone = 0;
+  private passageCorrect = 0;
+  private passageErrors = 0;
+  private firstKeyAt = -1;
+  private lastKeyAt = -1;
+  private prevChar = '';
+  private passagesDone = 0;
+  private gap = 0;
   private params: WaveParams = waveParams(1);
-  private spawned = 0;
-  private spawnTimer = 0;
-  private swarmQueue: number[] = [];
   private nextId = 1;
-  private words = new WordPicker();
   private dyingTimer = 0;
   private dyingPopTimer = 0;
   private idleTime = 0;
-  private demoSpawn = 1.5;
   private demoType = 0;
+  private demoLane = 0;
+  private harderRun = 0;
 
-  constructor(private layout: Layout) {}
+  constructor(
+    private layout: Layout,
+    readonly profile: Profile,
+  ) {
+    this.coach = new Coach(profile);
+    this.picker = new Picker(profile, this.coach);
+  }
 
   // ------------------------------------------------------------------ lifecycle
 
@@ -77,33 +115,43 @@ export class Game {
     this.wave = 0;
     this.integrity = CONFIG.maxIntegrity;
     this.stats = new Stats();
-    this.enemies = [];
-    this.bolts = [];
-    this.target = null;
+    this.clearConvoy();
     this.time = 0;
     this.timeScale = 1;
     this.showHint = true;
-    this.words.reset();
+    this.pace = 1;
+    this.harderRun = 0;
     this.turret.power = 0;
+    this.coach.reset();
+    this.picker.reset();
+    this.profile.touchDay();
+    this.events.emit('coach', this.coach.welcome(this.time));
     this.beginWave(1);
   }
 
   /** Back to the attract-mode demo that plays behind the title screen. */
   toIdle(): void {
     this.phase = 'idle';
+    this.clearConvoy();
+    this.timeScale = 1;
+    this.gap = 1.2;
+  }
+
+  private clearConvoy(): void {
     this.enemies = [];
     this.bolts = [];
+    this.ships = [];
     this.target = null;
-    this.timeScale = 1;
-    this.demoSpawn = 1.2;
+    this.passage = null;
+    this.crashed.clear();
+    this.revision++;
   }
 
   private beginWave(n: number): void {
     this.wave = n;
     this.params = waveParams(n);
-    this.spawned = 0;
-    this.spawnTimer = CONFIG.firstSpawnDelay;
-    this.swarmQueue = [];
+    this.passagesDone = 0;
+    this.gap = CONFIG.waveIntroTime;
     this.wavePhase = 'intro';
     this.waveTimer = CONFIG.waveIntroTime;
     this.stats.resetWave();
@@ -114,117 +162,342 @@ export class Game {
     return this.phase === 'playing' && this.stats.multiplier >= 5;
   }
 
-  // ------------------------------------------------------------------ input
+  /** Words per minute the convoy spacing assumes. */
+  get assumedCps(): number {
+    return clamp(this.profile.data.cps, 1.2, 14);
+  }
 
-  /** Handle one typed lowercase letter. Returns true if it was consumed. */
-  type(ch: string): boolean {
-    if (this.phase !== 'playing') return false;
+  // ------------------------------------------------------------------ convoy
 
-    let t = this.target;
-    if (t && t.state !== 'alive') t = this.target = null;
+  private startPassage(passage: Passage, demo = false): void {
+    const L = this.layout;
+    this.clearConvoy();
+    this.passage = passage;
+    this.cursor = 0;
+    this.tokenIdx = 0;
+    this.awaitingSpace = false;
+    this.partErrors = passage.parts.map(() => 0);
+    this.partCrashed = passage.parts.map(() => false);
+    this.partsDone = 0;
+    this.passageCorrect = 0;
+    this.passageErrors = 0;
+    this.firstKeyAt = -1;
+    this.lastKeyAt = -1;
+    this.prevChar = '';
 
-    if (!t) {
-      const visible = this.enemies.filter((e) => e.state === 'alive' && this.isTargetable(e));
-      if (visible.length === 0) return false; // nothing to shoot at: ignore, don't penalise
-      t = this.acquire(ch, visible);
-      if (!t) {
-        this.registerMiss(null);
-        return true;
+    const descent = demo ? 9 : this.params.descent;
+    const cps = demo ? 4.5 : this.assumedCps;
+    // The attract-mode column stacks words vertically, so it needs extra room between them.
+    const slack = demo ? 2.4 : this.params.slack * this.pace;
+    const margin = 26;
+    const gapX = 30 * L.k;
+    let laneLo = L.fieldX + margin;
+    let laneHi = L.fieldX + L.fieldW - margin;
+    if (demo) {
+      // Attract mode: a single column down one side of the title screen.
+      this.demoLane = 1 - this.demoLane;
+      const w = Math.max(150, L.fieldW * 0.12);
+      laneLo = this.demoLane ? L.fieldX + L.fieldW - margin - w : L.fieldX + margin;
+      laneHi = laneLo + w;
+    }
+    let x = demo ? laneLo : laneLo + rand(0, (laneHi - laneLo) * 0.22);
+
+    passage.tokens.forEach((tok, i) => {
+      const letters = tok.text.replace(/[^A-Za-z0-9]/g, '').length;
+      const kind: EnemyKind = letters <= 3 ? 'scout' : letters <= 7 ? 'fighter' : 'heavy';
+      const def = ENEMY_DEFS[kind];
+      const r = def.radius * L.k;
+      const labelW = L.labelWidth(tok.text.length);
+      const w = Math.max(labelW, r * 2.4);
+      if (demo || x + w > laneHi) x = demo ? laneLo + (laneHi - laneLo - w) / 2 : laneLo + rand(0, 50 * L.k);
+      const cx = x + w / 2;
+      x += w + gapX;
+      const delay = (tok.start / cps) * slack;
+      const e: Enemy = {
+        id: this.nextId++,
+        def,
+        word: tok.text,
+        typed: 0,
+        token: i,
+        vocab: tok.vocab,
+        nx: (cx - L.fieldX) / L.fieldW,
+        progress: -delay / descent,
+        speed: 1 / descent,
+        age: 0,
+        phase: Math.random() * Math.PI * 2,
+        state: 'alive',
+        doomTime: 0,
+        clean: true,
+        px: 0,
+        py: -999,
+        lx: 0,
+        ly: -999,
+        labelW,
+        r,
+        hitFlash: 0,
+        errorShake: 0,
+        lockT: 0,
+        spawnT: 0,
+        pop: 0,
+      };
+      this.place(e);
+      this.enemies.push(e);
+      this.ships.push(e);
+    });
+    this.retarget();
+    this.revision++;
+    if (!demo) {
+      this.passagesDone++;
+      this.events.emit('passageStart', { passage, index: this.passagesDone, total: this.params.passages });
+    }
+  }
+
+  /** Bring a ship in immediately (the player is ahead of the convoy). */
+  private summon(e: Enemy | null): void {
+    if (!e || e.state !== 'alive' || e.progress >= 0) return;
+    e.progress = 0;
+    this.place(e);
+    this.events.emit('spawn', { enemy: e });
+  }
+
+  private retarget(): void {
+    const next = this.ships[this.tokenIdx] ?? null;
+    if (next !== this.target) {
+      this.target = next && next.state === 'alive' ? next : null;
+      if (this.target) {
+        this.target.lockT = 0;
+        if (this.target.progress >= 0) this.events.emit('lock', { enemy: this.target });
       }
-      this.lockOn(t);
+    }
+  }
+
+  /** Skip words whose ships already crashed into the shield. */
+  private skipCrashed(): void {
+    const p = this.passage;
+    if (!p) return;
+    let moved = false;
+    while (this.tokenIdx < p.tokens.length && this.crashed.has(this.tokenIdx)) {
+      this.tokenIdx++;
+      moved = true;
+    }
+    if (!moved) return;
+    this.awaitingSpace = false;
+    this.cursor = this.tokenIdx < p.tokens.length ? p.tokens[this.tokenIdx].start : p.text.length;
+    this.revision++;
+    this.checkParts();
+    if (this.tokenIdx >= p.tokens.length) this.completePassage();
+    else {
+      this.summon(this.ships[this.tokenIdx]);
+      this.retarget();
+    }
+  }
+
+  /** Close out any sentence whose words are all done (typed or crashed). */
+  private checkParts(): void {
+    const p = this.passage;
+    if (!p) return;
+    while (this.partsDone < p.parts.length) {
+      const part = p.parts[this.partsDone];
+      const lastTok = p.tokens.reduce((m, t, i) => (t.part === this.partsDone ? i : m), -1);
+      if (lastTok >= this.tokenIdx || lastTok < 0) break;
+      const perfect = this.partErrors[this.partsDone] === 0 && !this.partCrashed[this.partsDone];
+      const s = this.stats;
+      s.sentences++;
+      if (perfect) {
+        s.perfectSentences++;
+        s.perfectStreak++;
+        s.bestPerfectStreak = Math.max(s.bestPerfectStreak, s.perfectStreak);
+        if (s.perfectStreak > this.profile.data.records.bestPerfectStreak) this.profile.data.records.bestPerfectStreak = s.perfectStreak;
+      } else {
+        s.perfectStreak = 0;
+      }
+      this.events.emit('sentenceDone', { perfect, streak: s.perfectStreak });
+      const msg = perfect ? this.coach.onPerfectStreak(s.perfectStreak, this.time) : null;
+      if (msg) this.events.emit('coach', msg);
+      void part;
+      this.partsDone++;
+    }
+  }
+
+  private completePassage(): void {
+    const p = this.passage;
+    if (!p || this.phase !== 'playing') {
+      this.passage = null;
+      this.gap = rand(1.2, 2.2);
+      return;
+    }
+    const s = this.stats;
+    const crashed = this.crashed.size;
+    const typedChars = this.passageCorrect;
+    const span = this.lastKeyAt - this.firstKeyAt;
+    const cps = span > 1 ? (typedChars - 1) / span : 0;
+    const acc = typedChars + this.passageErrors > 0 ? typedChars / (typedChars + this.passageErrors) : 1;
+    const perfect = crashed === 0 && this.passageErrors === 0;
+    const mult = s.multiplier;
+    let bonus = 0;
+    if (crashed === 0) {
+      bonus = 12 * p.text.length * mult;
+      if (perfect) bonus = Math.round(bonus * 1.5) + 50 * s.perfectStreak;
+      s.score += bonus;
     }
 
-    if (ch !== t.word[t.typed]) {
-      this.registerMiss(t);
+    // Learn from the transmission and adapt the pace.
+    const wasNew = this.profile.isNew;
+    const prevBest = this.profile.data.records.bestPassageWpm;
+    if (cps > 0) this.profile.recordPassage(cps, acc, typedChars);
+    const wpm = Math.round(cps * 12);
+    if (wasNew && cps > 0 && this.profile.data.passages === 1) this.events.emit('coach', this.coach.firstReading(wpm, this.time));
+    else if (wpm > prevBest && prevBest > 0 && typedChars >= 25) this.events.emit('coach', this.coach.onRecord(wpm, this.time));
+
+    if (crashed > 0) {
+      this.pace = clamp(this.pace * (1 + 0.12 * Math.min(3, crashed)), 0.65, 1.8);
+      this.harderRun = 0;
+      const msg = this.coach.onPace('easier', this.time);
+      if (msg) this.events.emit('coach', msg);
+    } else if (acc >= 0.96) {
+      this.pace = clamp(this.pace * 0.93, 0.65, 1.8);
+      this.harderRun++;
+      if (this.harderRun === 2 || this.harderRun === 5) {
+        const msg = this.coach.onPace('harder', this.time);
+        if (msg) this.events.emit('coach', msg);
+      }
+    }
+    this.profile.save();
+    this.events.emit('passageComplete', { perfect, bonus, wpm, crashed });
+    this.passage = null;
+    this.target = null;
+    this.gap = 1.1;
+    this.revision++;
+  }
+
+  // ------------------------------------------------------------------ input
+
+  /** Handle one typed character (case-sensitive; ' ' for space). Returns true if consumed. */
+  type(ch: string): boolean {
+    if (this.phase !== 'playing' || !this.passage || this.wavePhase !== 'combat') return false;
+    return this.press(ch, false);
+  }
+
+  private press(ch: string, demo: boolean): boolean {
+    const p = this.passage;
+    if (!p || this.tokenIdx >= p.tokens.length) return false;
+    const expected = p.text[this.cursor];
+    if (expected === undefined) return false;
+    const ship = this.ships[this.tokenIdx];
+    const latency = this.lastKeyAt >= 0 ? (this.time - this.lastKeyAt) * 1000 : null;
+
+    if (!demo) {
+      this.profile.record(expected, ch, this.prevChar, latency);
+      const msg = this.coach.onKey(expected, ch, this.time);
+      if (msg) this.events.emit('coach', msg);
+      if (this.firstKeyAt < 0) this.firstKeyAt = this.time;
+      this.lastKeyAt = this.time;
+    }
+
+    if (ch !== expected) {
+      if (!demo) this.registerMiss(ship, expected, ch);
       return true;
     }
 
-    this.stats.typingStarted = true;
-    const prevMult = this.stats.multiplier;
-    this.stats.correct++;
-    this.stats.waveCorrect++;
-    this.stats.combo++;
-    if (this.stats.combo > this.stats.maxCombo) this.stats.maxCombo = this.stats.combo;
-    if (this.stats.multiplier > prevMult) this.events.emit('multiplierUp', { multiplier: this.stats.multiplier });
-    this.advance(t);
-    return true;
-  }
+    this.prevChar = expected;
+    if (!demo) {
+      this.stats.typingStarted = true;
+      this.showHint = false;
+      const prevMult = this.stats.multiplier;
+      this.stats.correct++;
+      this.stats.waveCorrect++;
+      this.stats.combo++;
+      this.passageCorrect++;
+      if (this.stats.combo > this.stats.maxCombo) this.stats.maxCombo = this.stats.combo;
+      if (this.stats.combo > this.profile.data.records.bestCombo) this.profile.data.records.bestCombo = this.stats.combo;
+      if (this.stats.multiplier > prevMult) this.events.emit('multiplierUp', { multiplier: this.stats.multiplier });
+    }
 
-  /** Backspace: drop the current lock (progress on that ship is kept). */
-  release(): void {
-    if (this.phase !== 'playing' || !this.target) return;
-    const e = this.target;
-    this.target = null;
-    this.events.emit('release', { enemy: e });
-  }
+    if (this.awaitingSpace) {
+      // The space hands the lock to the next ship.
+      this.cursor++;
+      this.awaitingSpace = false;
+      this.revision++;
+      this.summon(this.ships[this.tokenIdx]);
+      this.retarget();
+      this.skipCrashed();
+      this.events.emit('space', { next: this.target });
+      return true;
+    }
 
-  private lockOn(t: Enemy): void {
-    this.target = t;
-    t.lockT = 0;
-    this.showHint = false;
-    this.events.emit('lock', { enemy: t });
-  }
-
-  /** A correct letter on `t`: fire a bolt, or strike if the word is complete. */
-  private advance(t: Enemy): void {
-    t.typed++;
-    t.pop = 1;
-    const final = t.typed >= t.word.length;
-    this.aimAndRecoil(t);
+    if (!ship) return true;
+    this.summon(ship);
+    ship.typed++;
+    ship.pop = 1;
+    this.cursor++;
+    this.revision++;
+    const final = ship.typed >= ship.word.length;
+    this.aimAndRecoil(ship);
     const m = this.muzzle();
-    this.events.emit('shot', { enemy: t, index: t.typed - 1, final, x: m.x, y: m.y, angle: this.turret.angle });
-    if (final) {
-      this.target = null;
-      this.events.emit('strike', { enemy: t, x0: m.x, y0: m.y, x1: t.px, y1: t.py });
-      this.killEnemy(t, t.px, t.py, this.phase !== 'playing');
-    } else {
+    this.events.emit('shot', { enemy: ship, index: ship.typed - 1, final, x: m.x, y: m.y, angle: this.turret.angle });
+    if (!final) {
       this.bolts.push({
         x: m.x,
         y: m.y,
         trail: [m.x, m.y],
-        enemy: t,
+        enemy: ship,
         final: false,
         speed: CONFIG.boltSpeed * this.layout.k,
         age: 0,
-        heat: t.typed / t.word.length,
-        tx: t.px,
-        ty: t.py,
+        heat: ship.typed / ship.word.length,
+        tx: ship.px,
+        ty: ship.py,
       });
+      return true;
     }
+
+    // Word complete: lightning.
+    this.events.emit('strike', { enemy: ship, x0: m.x, y0: m.y, x1: ship.px, y1: ship.py });
+    this.killEnemy(ship, ship.px, ship.py, demo);
+    if (!demo && ship.vocab) this.vocabMet(ship.token, ship.clean);
+    this.tokenIdx++;
+    this.checkParts();
+    if (this.tokenIdx >= p.tokens.length) {
+      this.completePassage();
+      return true;
+    }
+    this.awaitingSpace = p.text[this.cursor] === ' ';
+    if (this.crashed.has(this.tokenIdx)) this.skipCrashed();
+    else {
+      // Show the next ship right away so there is always something to aim at.
+      this.summon(this.ships[this.tokenIdx]);
+      this.retarget();
+    }
+    return true;
   }
 
-  private registerMiss(enemy: Enemy | null): void {
+  private registerMiss(ship: Enemy | null, expected: string, typed: string): void {
     this.stats.errors++;
     this.stats.waveErrors++;
-    if (enemy) {
-      enemy.errorShake = 1;
-      enemy.clean = false;
+    this.passageErrors++;
+    const part = this.passage?.tokens[this.tokenIdx]?.part ?? 0;
+    this.partErrors[part] = (this.partErrors[part] ?? 0) + 1;
+    if (ship) {
+      ship.errorShake = 1;
+      if (!this.awaitingSpace) ship.clean = false;
     }
     this.turret.jam = 1;
     const combo = this.stats.combo;
     const multiplier = this.stats.multiplier;
     this.stats.combo = 0;
-    this.events.emit('miss', { enemy });
+    this.events.emit('miss', { enemy: ship, expected, typed });
     if (combo >= 3) this.events.emit('comboBreak', { combo, multiplier });
   }
 
-  private hasTargetable(): boolean {
-    for (const e of this.enemies) if (e.state === 'alive' && this.isTargetable(e)) return true;
-    return this.target !== null;
-  }
-
-  private isTargetable(e: Enemy): boolean {
-    return e.ly > 2 && e.spawnT > 0.25;
-  }
-
-  /** Pick the enemy whose next letter matches, preferring the one closest to the shield. */
-  private acquire(ch: string, candidates: Enemy[]): Enemy | null {
-    let best: Enemy | null = null;
-    for (const e of candidates) {
-      if (e.word[e.typed] !== ch) continue;
-      if (!best || e.progress > best.progress) best = e;
-    }
-    return best;
+  private vocabMet(tokenIndex: number, clean: boolean): void {
+    const p = this.passage;
+    if (!p) return;
+    const part = p.parts[p.tokens[tokenIndex].part];
+    if (!part?.vocab) return;
+    const { entry, context, isNew } = part.vocab;
+    if (!this.stats.vocab.includes(entry.word)) this.stats.vocab.push(entry.word);
+    const state = this.profile.vocabMet(entry.word, context, clean);
+    this.events.emit('vocab', { entry, isNew, clean, state });
   }
 
   // ------------------------------------------------------------------ combat
@@ -239,7 +512,6 @@ export class Game {
   }
 
   private aimAndRecoil(enemy: Enemy): void {
-    // Snap the barrel toward the target so shots visibly leave the muzzle in the right direction.
     this.turret.angle = approach(this.turret.angle, this.aimAngle(enemy), 60, 0.05);
     this.turret.recoil = 1;
     this.turret.flash = 1;
@@ -252,142 +524,19 @@ export class Game {
     return clamp(a, -1.35, 1.35);
   }
 
-  private spawnEnemy(kind: EnemyKind, lanes?: Array<[number, number]>): boolean {
-    const L = this.layout;
-    const def = ENEMY_DEFS[kind];
-    const [minLen, maxLen] = def.wordLen(Math.max(1, this.wave));
-
-    // Avoid starting letters that are currently "next" on any living enemy.
-    const avoid = new Set<string>();
-    for (const e of this.enemies) if (e.state === 'alive') avoid.add(e.word[e.typed]);
-
-    const word = this.words.pick(minLen, maxLen, avoid);
-    const r = def.radius * L.k;
-    const labelW = L.labelWidth(word.length);
-    const nx = this.findSpawnX(labelW, r, lanes);
-    if (nx === null) {
-      this.words.unpickLast();
-      return false;
-    }
-    const speedMul = this.phase === 'idle' ? 1.1 : this.params.speedMul;
-    const speed = (speedMul / def.travelTime) * rand(0.94, 1.06);
-    const e: Enemy = {
-      id: this.nextId++,
-      def,
-      word,
-      typed: 0,
-      nx,
-      progress: 0,
-      speed,
-      age: 0,
-      phase: Math.random() * Math.PI * 2,
-      state: 'alive',
-      doomTime: 0,
-      clean: true,
-      px: 0,
-      py: 0,
-      lx: 0,
-      ly: -999,
-      labelW,
-      r,
-      hitFlash: 0,
-      errorShake: 0,
-      lockT: 0,
-      spawnT: 0,
-      pop: 0,
-    };
-    this.place(e);
-    this.enemies.push(e);
-    this.events.emit('spawn', { enemy: e });
-    return true;
-  }
-
-  /** Choose a lane whose label won't collide with ships still near the top. */
-  private findSpawnX(labelW: number, r: number, lanes?: Array<[number, number]>): number | null {
-    const L = this.layout;
-    const half = Math.max(labelW / 2, r) + 10;
-    const minX = (half + 8) / L.fieldW;
-    const maxX = 1 - minX;
-    if (minX >= maxX) return 0.5;
-    const ok: number[] = [];
-    let bestNx = 0.5;
-    let bestGap = -Infinity;
-    for (let i = 0; i < 18; i++) {
-      let nx: number;
-      if (lanes) {
-        const [a, b] = lanes[i % lanes.length];
-        nx = clamp(rand(a, b), minX, maxX);
-      } else {
-        nx = rand(minX, maxX);
-      }
-      const x = L.fx(nx);
-      let minGap = Infinity;
-      for (const e of this.enemies) {
-        if (e.state === 'dead') continue;
-        // Only ships still in the upper part of the screen can collide with a new spawn.
-        if (e.py > L.h * 0.42) continue;
-        const otherHalf = Math.max(e.labelW / 2, e.r) + 10;
-        const gap = Math.abs(x - e.px) - (half + otherHalf);
-        if (gap < minGap) minGap = gap;
-      }
-      if (minGap >= 18) ok.push(nx);
-      if (minGap > bestGap) {
-        bestGap = minGap;
-        bestNx = nx;
-      }
-    }
-    if (ok.length) return ok[Math.floor(Math.random() * ok.length)];
-    return bestGap > -4 ? bestNx : null;
-  }
-
-  /** Recompute pixel positions from normalised state. */
+  /** Recompute pixel positions from normalised state. Depth 0 = transmission bar, 1 = shield. */
   private place(e: Enemy): void {
     const L = this.layout;
     const gap = e.r * 0.9;
     const baseX = L.fx(e.nx);
-    const weave = e.def.weaveAmp * L.k * Math.sin(e.age * e.def.weaveFreq + e.phase) * Math.min(1, e.age);
+    const weave = e.def.weaveAmp * 0.5 * L.k * Math.sin(e.age * e.def.weaveFreq + e.phase) * Math.min(1, e.age);
+    const top = L.bandY + e.r + 6;
     const endY = L.endY(baseX, gap);
     e.px = baseX + weave;
-    e.py = L.spawnY + (endY - L.spawnY) * e.progress;
-    // The label tracks the lane (not the weave) so words stay steady and readable.
+    e.py = top + (endY - top) * e.progress;
     e.lx = baseX + weave * 0.25;
     e.ly = e.py + gap + L.labelOffset * 0.35;
     e.labelW = L.labelWidth(e.word.length);
-  }
-
-  /** Push overlapping ships apart horizontally so labels never pile up. */
-  private separate(dt: number): void {
-    const L = this.layout;
-    const list = this.enemies.filter((e) => e.state !== 'dead');
-    const pad = 10;
-    for (let i = 0; i < list.length; i++) {
-      for (let j = i + 1; j < list.length; j++) {
-        const a = list[i];
-        const b = list[j];
-        const aTop = a.py - a.r - pad;
-        const aBot = a.ly + L.labelH + pad;
-        const bTop = b.py - b.r - pad;
-        const bBot = b.ly + L.labelH + pad;
-        if (aBot < bTop || bBot < aTop) continue;
-        const aHalf = Math.max(a.labelW / 2, a.r) + pad;
-        const bHalf = Math.max(b.labelW / 2, b.r) + pad;
-        const dx = b.lx - a.lx;
-        const overlap = aHalf + bHalf - Math.abs(dx);
-        if (overlap <= 0) continue;
-        const dir = dx === 0 ? (a.id < b.id ? 1 : -1) : Math.sign(dx);
-        const push = Math.min(overlap / 2, 420 * L.k * dt) / L.fieldW;
-        // The locked target barely moves so the player's eyes don't have to chase it.
-        const wa = a === this.target ? 0.25 : 1;
-        const wb = b === this.target ? 0.25 : 1;
-        a.nx -= dir * push * wa * (2 / (wa + wb));
-        b.nx += dir * push * wb * (2 / (wa + wb));
-      }
-    }
-    for (const e of list) {
-      const half = Math.max(e.labelW / 2, e.r) + 8;
-      const lo = half / L.fieldW;
-      e.nx = clamp(e.nx, Math.min(lo, 0.5), Math.max(1 - lo, 0.5));
-    }
   }
 
   // ------------------------------------------------------------------ update
@@ -398,6 +547,7 @@ export class Game {
 
     if (this.phase === 'idle') {
       this.idleTime += dt;
+      this.time += dt;
       this.updateDemo(dt);
       this.updateEnemies(dt);
       this.updateBolts(dt);
@@ -409,49 +559,40 @@ export class Game {
     }
 
     this.time += dt;
-
     if (this.phase === 'dying') {
       this.updateDying(rawDt);
     } else {
       this.updateWave(dt);
-      // WPM clock: only while there is something on screen to type at (excludes pauses, banners, empty lulls).
-      if (this.wavePhase === 'combat' && this.stats.typingStarted && this.hasTargetable()) this.stats.activeTime += dt;
+      if (this.wavePhase === 'combat' && this.stats.typingStarted && this.target && this.target.progress >= 0) this.stats.activeTime += dt;
     }
-
     this.updateEnemies(dt);
     this.updateBolts(dt);
   }
 
-  /** Attract mode: a few ships drift down the sides and the turret types them out on its own. */
+  /** Attract mode: short sentences drift down one side and the turret types them itself. */
   private updateDemo(dt: number): void {
-    this.demoSpawn -= dt;
-    if (this.demoSpawn <= 0) {
-      this.demoSpawn = rand(1.8, 3.2);
-      if (this.enemies.length < 3) {
-        const kind: EnemyKind = weighted({ scout: 0.55, fighter: 0.45 });
-        this.spawnEnemy(kind, [
-          [0.01, 0.09],
-          [0.91, 0.99],
-        ]);
-      }
+    if (!this.passage) {
+      this.gap -= dt;
+      if (this.gap <= 0 && this.enemies.length === 0) this.startPassage(this.picker.next(1, { demo: true }), true);
+      return;
     }
     this.demoType -= dt;
     if (this.demoType > 0) return;
-    this.demoType = rand(0.09, 0.17);
-    let t = this.target;
-    if (!t || t.state !== 'alive') {
-      t = null;
-      for (const e of this.enemies) if (e.state === 'alive' && e.progress > 0.38 && (!t || e.progress > t.progress)) t = e;
-      if (!t) return;
-      this.lockOn(t);
-    }
-    this.advance(t);
+    this.demoType = rand(0.08, 0.16);
+    const ship = this.ships[this.tokenIdx];
+    // Wait until the word is well into view before typing it.
+    if (ship && ship.progress < 0.3 && !this.awaitingSpace && ship.typed === 0) return;
+    const ch = this.passage.text[this.cursor];
+    if (ch !== undefined) this.press(ch, true);
   }
 
   private updateWave(dt: number): void {
     if (this.wavePhase === 'intro') {
       this.waveTimer -= dt;
-      if (this.waveTimer <= 0) this.wavePhase = 'combat';
+      if (this.waveTimer <= 0) {
+        this.wavePhase = 'combat';
+        this.gap = 0.3;
+      }
       return;
     }
     if (this.wavePhase === 'clear') {
@@ -459,37 +600,12 @@ export class Game {
       if (this.waveTimer <= 0) this.beginWave(this.wave + 1);
       return;
     }
-
-    // combat: spawning
-    const p = this.params;
-    const alive = this.enemies.filter((e) => e.state === 'alive').length;
-    if (this.spawned < p.count) {
-      this.spawnTimer -= dt;
-      // Avoid dead air: if the field is empty, hurry the next spawn along.
-      if (alive === 0 && this.spawnTimer > 0.6) this.spawnTimer = 0.6;
-      if (this.spawnTimer <= 0 && alive < p.maxAlive) {
-        let kind: EnemyKind = weighted(p.weights);
-        if (this.swarmQueue.length) kind = 'scout';
-        if (this.spawnEnemy(kind)) {
-          this.spawned++;
-          if (this.swarmQueue.length) {
-            this.swarmQueue.shift();
-            this.spawnTimer = this.swarmQueue.length ? 0.45 : p.interval * rand(0.85, 1.15);
-          } else if (kind === 'scout' && Math.random() < p.swarmChance && this.spawned < p.count - 1) {
-            const extra = Math.random() < 0.4 ? 2 : 1;
-            for (let i = 0; i < extra; i++) this.swarmQueue.push(1);
-            this.spawnTimer = 0.45;
-          } else {
-            const heavyPause = kind === 'heavy' ? 1.25 : 1;
-            this.spawnTimer = p.interval * rand(0.8, 1.2) * heavyPause;
-          }
-        } else {
-          this.spawnTimer = 0.25; // no fair lane right now; try again shortly
-        }
-      }
-    } else if (this.enemies.length === 0 && this.bolts.length === 0) {
-      this.clearWave();
-    }
+    if (this.passage) return;
+    if (this.enemies.length || this.bolts.length) return;
+    this.gap -= dt;
+    if (this.gap > 0) return;
+    if (this.passagesDone >= this.params.passages) this.clearWave();
+    else this.startPassage(this.picker.next(this.wave));
   }
 
   private clearWave(): void {
@@ -512,18 +628,20 @@ export class Game {
 
   private updateEnemies(dt: number): void {
     for (const e of this.enemies) {
+      const wasHidden = e.progress < 0;
       e.age += dt;
-      e.spawnT = Math.min(1, e.spawnT + dt * 2.5);
       e.hitFlash = Math.max(0, e.hitFlash - dt * 6);
       e.errorShake = Math.max(0, e.errorShake - dt * 4);
       e.lockT = Math.min(1, e.lockT + dt * 5);
       e.pop = Math.max(0, e.pop - dt * 7);
       if (e.state === 'alive') e.progress += e.speed * dt;
+      if (e.progress >= 0) e.spawnT = Math.min(1, e.spawnT + dt * 3);
       this.place(e);
+      if (wasHidden && e.progress >= 0) {
+        this.events.emit('spawn', { enemy: e });
+        if (e === this.target) this.events.emit('lock', { enemy: e });
+      }
     }
-
-    this.separate(dt);
-
     for (const e of this.enemies) {
       if (e.state === 'alive' && e.progress >= 1) this.hitBase(e);
     }
@@ -532,29 +650,29 @@ export class Game {
 
   private hitBase(e: Enemy): void {
     e.state = 'dead';
-    if (this.target === e) {
-      this.target = null;
-      this.events.emit('release', { enemy: e });
-    }
-    if (this.phase !== 'playing') {
+    this.crashed.add(e.token);
+    this.revision++;
+    const part = this.passage?.tokens[e.token]?.part ?? 0;
+    this.partCrashed[part] = true;
+    if (this.phase === 'playing') {
+      const damage = e.def.kind === 'heavy' ? 2 : 1;
+      this.integrity = Math.max(0, this.integrity - damage);
+      this.stats.waveDamage += damage;
+      this.stats.wordsMissed++;
+      const combo = this.stats.combo;
+      const multiplier = this.stats.multiplier;
+      this.stats.combo = 0;
+      if (combo >= 3) this.events.emit('comboBreak', { combo, multiplier });
+      this.events.emit('baseHit', { enemy: e, x: e.px, y: this.layout.shieldY(e.px), damage, integrity: this.integrity });
+      if (e.vocab) this.vocabMet(e.token, false);
+      if (this.integrity <= 0) {
+        this.beginDying();
+        return;
+      }
+    } else {
       this.events.emit('kill', { enemy: e, x: e.px, y: e.py, points: 0, multiplier: 1, silent: true, perfect: false });
-      return;
     }
-    const damage = e.def.damage;
-    this.integrity = Math.max(0, this.integrity - damage);
-    this.stats.waveDamage += damage;
-    const combo = this.stats.combo;
-    const multiplier = this.stats.multiplier;
-    this.stats.combo = 0;
-    if (combo >= 3) this.events.emit('comboBreak', { combo, multiplier });
-    this.events.emit('baseHit', {
-      enemy: e,
-      x: e.px,
-      y: this.layout.shieldY(e.px),
-      damage,
-      integrity: this.integrity,
-    });
-    if (this.integrity <= 0) this.beginDying();
+    if (e.token === this.tokenIdx) this.skipCrashed();
   }
 
   private killEnemy(e: Enemy, x: number, y: number, silent = false): void {
@@ -564,7 +682,7 @@ export class Game {
     const mult = this.stats.multiplier;
     const perfect = !silent && e.clean && e.word.length >= 4;
     if (!silent && this.phase === 'playing') {
-      points = Math.round((e.def.basePoints + e.word.length * 10) * mult * (perfect ? PERFECT_BONUS : 1));
+      points = Math.round((BASE_POINTS[e.def.kind] + e.word.length * 10) * mult * (perfect ? PERFECT_BONUS : 1) * (e.vocab ? 2 : 1));
       this.stats.score += points;
       this.stats.kills++;
     }
@@ -577,7 +695,6 @@ export class Game {
     for (const b of this.bolts) {
       b.age += dt;
       const e = b.enemy;
-      // Track the target while it lives; otherwise fly to where it died.
       if (e.state !== 'dead') {
         b.tx = e.px;
         b.ty = e.py;
@@ -587,10 +704,7 @@ export class Game {
       const dist = Math.hypot(dx, dy);
       const step = b.speed * dt;
       if (dist <= step + e.r * 0.4) {
-        if (e.state === 'alive') {
-          e.hitFlash = 1;
-          e.progress = Math.max(0, e.progress - e.def.knockback);
-        }
+        if (e.state === 'alive') e.hitFlash = 1;
         this.events.emit('hit', { enemy: e, x: b.tx - (dx / (dist || 1)) * e.r * 0.5, y: b.ty - (dy / (dist || 1)) * e.r * 0.5 });
         continue;
       }
@@ -605,16 +719,14 @@ export class Game {
 
   private updateTurret(dt: number): void {
     const t = this.turret;
-    let desired: number;
-    if (this.target && this.target.state === 'alive') {
-      desired = this.aimAngle(this.target);
-      t.angle = approach(t.angle, desired, 28, dt);
+    const tgt = this.target;
+    if (tgt && tgt.state === 'alive' && tgt.progress >= 0) {
+      t.angle = approach(t.angle, this.aimAngle(tgt), 28, dt);
     } else {
-      // Idle scan: slowly sweep, drifting toward the most dangerous ship.
       let threat: Enemy | null = null;
-      for (const e of this.enemies) if (e.state === 'alive' && (!threat || e.progress > threat.progress)) threat = e;
+      for (const e of this.enemies) if (e.state === 'alive' && e.progress >= 0 && (!threat || e.progress > threat.progress)) threat = e;
       const sweep = Math.sin((this.phase === 'idle' ? this.idleTime : this.time) * 0.55) * 0.55;
-      desired = threat ? this.aimAngle(threat) * 0.6 + sweep * 0.25 : sweep;
+      const desired = threat ? this.aimAngle(threat) * 0.6 + sweep * 0.25 : sweep;
       t.angle = approach(t.angle, desired, 3, dt);
     }
     t.recoil = approach(t.recoil, 0, 16, dt);
@@ -632,33 +744,39 @@ export class Game {
     this.dyingTimer = 0;
     this.dyingPopTimer = 0.35;
     this.target = null;
+    this.profile.data.records.bestWpm = Math.max(this.profile.data.records.bestWpm, Math.round(this.stats.wpm));
+    this.profile.save();
     this.events.emit('gameOver', { stats: this.stats, wave: this.wave });
   }
 
   private updateDying(rawDt: number): void {
     this.dyingTimer += rawDt;
-    // Ease into slow motion, then hold.
     this.timeScale = clamp(1 - this.dyingTimer * 1.6, 0.3, 1);
     this.dyingPopTimer -= rawDt;
     if (this.dyingPopTimer <= 0) {
       this.dyingPopTimer = 0.16;
-      const victim = this.enemies.find((e) => e.state !== 'dead');
+      const victim = this.enemies.find((e) => e.state !== 'dead' && e.progress >= 0);
       if (victim) this.killEnemy(victim, victim.px, victim.py, true);
     }
     if (this.dyingTimer >= CONFIG.dyingTime) {
-      for (const e of this.enemies) if (e.state !== 'dead') this.killEnemy(e, e.px, e.py, true);
+      for (const e of this.enemies) if (e.state !== 'dead' && e.progress >= 0) this.killEnemy(e, e.px, e.py, true);
       this.enemies = [];
+      this.passage = null;
       this.phase = 'over';
       this.timeScale = 1;
+      this.revision++;
     }
   }
 
-  /** Remaining enemies in the current wave (for the HUD progress bar). */
-  get waveRemaining(): number {
-    return this.params.count - this.spawned + this.enemies.filter((e) => e.state === 'alive').length;
+  /** 0..1 progress through the current wave, for the HUD bar. */
+  get waveProgress(): number {
+    const total = this.params.passages;
+    const inPassage = this.passage ? this.cursor / Math.max(1, this.passage.text.length) : 0;
+    const done = this.passage ? this.passagesDone - 1 : this.passagesDone;
+    return clamp((done + inPassage) / total, 0, 1);
   }
 
-  get waveTotal(): number {
-    return this.params.count;
+  get passagesTotal(): number {
+    return this.params.passages;
   }
 }

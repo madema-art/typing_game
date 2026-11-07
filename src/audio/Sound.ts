@@ -303,4 +303,76 @@ export class Sound {
       e.tone(out, e.now + i * 0.06, 'triangle', f, f, 0.01, 0.07, 0.003, 0.4);
     }
   }
+
+  // ------------------------------------------------------------------ sentences & vocabulary
+
+  /** The space bar: a soft, airy click as the lock jumps to the next ship. */
+  space(pan: number): void {
+    if (!this.ready) return;
+    const e = this.e!;
+    const out = e.out(pan * 0.5, 0.05);
+    e.noiseHit(out, e.now, 'bandpass', 2400, 1800, 2, 0.035, 0.001, 0.035);
+    e.tone(out, e.now, 'sine', 900, 1300, 0.04, 0.02, 0.002, 0.05);
+  }
+
+  /** A new transmission arrives: radio-ish chirp. */
+  transmission(): void {
+    if (!this.ready) return;
+    const e = this.e!;
+    const out = e.out(0, 0.3, 0.25);
+    const t = e.now;
+    e.noiseHit(out, t, 'bandpass', 1200, 3200, 6, 0.04, 0.02, 0.18);
+    e.tone(out, t + 0.02, 'square', 1046.5, 1046.5, 0.01, 0.02, 0.003, 0.06);
+    e.tone(out, t + 0.1, 'square', 1568, 1568, 0.01, 0.02, 0.003, 0.08);
+  }
+
+  /** A whole transmission typed: a short rising flourish (brighter when perfect). */
+  passageComplete(perfect: boolean): void {
+    if (!this.ready) return;
+    const e = this.e!;
+    const out = e.out(0, 0.45, 0.3);
+    const t = e.now + 0.12;
+    const n = perfect ? 4 : 3;
+    for (let i = 0; i < n; i++) {
+      const f = mtof(this.note(i + 1, 72));
+      e.tone(out, t + i * 0.06, 'triangle', f, f, 0.01, 0.06, 0.003, 0.45);
+      if (perfect) e.tone(out, t + i * 0.06, 'sine', f * 2, f * 2, 0.01, 0.025, 0.003, 0.6);
+    }
+  }
+
+  /** A lexicon word captured: a sparkly, music-box arpeggio. */
+  lexicon(isNew: boolean): void {
+    if (!this.ready) return;
+    const e = this.e!;
+    const out = e.out(0.3, 0.6, 0.4);
+    const t = e.now + 0.08;
+    const steps = isNew ? [0, 2, 4, 7, 9] : [0, 4, 7];
+    steps.forEach((step, i) => {
+      const f = mtof(this.note(step, 76));
+      e.tone(out, t + i * 0.07, 'sine', f, f, 0.01, 0.06, 0.002, 0.7);
+      e.tone(out, t + i * 0.07, 'triangle', f * 3, f * 3, 0.01, 0.012, 0.002, 0.3);
+    });
+  }
+
+  /** The coach speaks: a tiny two-note blip, flavoured by tone. */
+  coach(tone: 'tip' | 'praise' | 'warn' | 'info'): void {
+    if (!this.ready) return;
+    const e = this.e!;
+    const out = e.out(0.4, 0.25);
+    const base = tone === 'praise' ? 76 : tone === 'tip' ? 69 : 72;
+    const a = mtof(this.note(0, base));
+    const b = mtof(this.note(tone === 'tip' ? 0 : 2, base));
+    e.tone(out, e.now, 'sine', a, a, 0.01, 0.035, 0.003, 0.12);
+    e.tone(out, e.now + 0.09, 'sine', b, b, 0.01, 0.035, 0.003, 0.18);
+  }
+
+  /** Perfect-sentence streak tick; climbs with the streak. */
+  streak(n: number): void {
+    if (!this.ready) return;
+    const e = this.e!;
+    const out = e.out(-0.3, 0.35, 0.2);
+    const f = mtof(this.note(Math.min(n, 10), 64));
+    e.tone(out, e.now + 0.05, 'triangle', f, f, 0.01, 0.05, 0.003, 0.3);
+    e.tone(out, e.now + 0.05, 'sine', f * 1.5, f * 1.5, 0.01, 0.02, 0.003, 0.35);
+  }
 }

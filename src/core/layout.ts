@@ -20,6 +20,8 @@ export class Layout {
   turretY = 720;
   horizonY = 740;
   spawnY = -60;
+  /** Bottom edge of the transmission bar: words materialize here. Set by the app from the DOM. */
+  bandY = 130;
   labelFont = 20;
   labelH = 30;
   labelOffset = 30;

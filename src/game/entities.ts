@@ -6,11 +6,15 @@ export interface Enemy {
   id: number;
   def: EnemyDef;
   word: string;
-  /** Number of letters correctly typed so far. */
+  /** Number of characters correctly typed so far. */
   typed: number;
+  /** Index of the word in the current transmission. */
+  token: number;
+  /** True for the lexicon word being taught (gold ship, double points). */
+  vocab: boolean;
   /** Normalised lane position across the play field (0..1). */
   nx: number;
-  /** Descent progress: 0 = spawn point above screen, 1 = touching the shield. */
+  /** Descent: < 0 = still inside the transmission (hidden), 0 = transmission bar, 1 = touching the shield. */
   progress: number;
   /** Progress per second. */
   speed: number;

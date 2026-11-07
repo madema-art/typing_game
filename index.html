@@ -18,6 +18,7 @@
           <div class="hud-label">Score</div>
           <div class="hud-score-value" id="hud-score">0</div>
           <div class="hud-mult" id="hud-mult"><span>×1</span> multiplier</div>
+          <div class="hud-streak" id="hud-streak"><span class="flame"></span><b>0</b> perfect in a row</div>
         </div>
         <div class="hud-block hud-wave">
           <div class="hud-label">Wave <b id="hud-wave">1</b></div>
@@ -29,6 +30,21 @@
             <span class="metric"><b id="hud-wpm">—</b><small>WPM</small></span>
             <span class="metric"><b id="hud-acc">100</b><small>% ACC</small></span>
           </div>
+        </div>
+        <div class="transmission" id="transmission">
+          <div class="tx-head">
+            <span class="tx-label" id="tx-label">Incoming transmission</span>
+            <span class="tx-count" id="tx-count"></span>
+          </div>
+          <div class="tx-text" id="tx-text"></div>
+          <div class="caps" id="caps-warning">Caps Lock is on</div>
+        </div>
+        <div class="coach" id="coach"><span class="coach-tag">Coach</span><span class="coach-text" id="coach-text"></span></div>
+        <div class="vocab-card hud-block" id="vocab-card">
+          <div class="vocab-kicker" id="vocab-kicker">New word</div>
+          <div class="vocab-word"><span id="vocab-word"></span> <em id="vocab-pos"></em></div>
+          <div class="vocab-def" id="vocab-def"></div>
+          <div class="vocab-meta" id="vocab-meta"></div>
         </div>
         <div class="hud-shield">
           <div class="hud-label">Shield</div>
@@ -50,7 +66,7 @@
             <span class="logo-glow" aria-hidden="true">KEYSTORM</span>
             <span class="logo-text" data-text="KEYSTORM">KEYSTORM</span>
           </div>
-          <p class="tagline">Every keystroke is a shot. Every word is a kill.</p>
+          <p class="tagline">Every keystroke is a shot. Every sentence is a story.</p>
 
           <div class="start-prompt">
             <span class="prompt-label">Type</span>
@@ -59,10 +75,12 @@
           </div>
 
           <ol class="howto">
-            <li><span><b>Type</b> a ship's word to lock on &amp; fire</span></li>
-            <li><span><b>Finish</b> the word to destroy it</span></li>
-            <li><span><b>Hold</b> the shield as long as you can</span></li>
+            <li><span><b>Type</b> each transmission: every word is a ship</span></li>
+            <li><span><b>Capitals, punctuation</b> and spaces count</span></li>
+            <li><span><b>Gold words</b> teach you new vocabulary</span></li>
           </ol>
+
+          <div class="title-stats" id="title-stats"></div>
 
           <div class="title-lower">
             <div class="scores">
@@ -72,14 +90,15 @@
             <div class="keys">
               <h3>Controls</h3>
               <dl>
-                <dt><kbd>A–Z</kbd></dt><dd>Lock &amp; fire</dd>
-                <dt><kbd>Backspace</kbd></dt><dd>Release lock</dd>
+                <dt><kbd>Type</kbd></dt><dd>Fire at the next word</dd>
+                <dt><kbd>Space</kbd></dt><dd>Lock the next ship</dd>
                 <dt><kbd>Esc</kbd></dt><dd>Pause / resume</dd>
               </dl>
               <div class="options">
                 <button type="button" class="opt" id="opt-sound" tabindex="-1"></button>
                 <button type="button" class="opt" id="opt-music" tabindex="-1"></button>
                 <button type="button" class="opt" id="opt-motion" tabindex="-1"></button>
+                <button type="button" class="opt opt-lexicon" id="opt-lexicon" tabindex="-1"></button>
               </div>
             </div>
           </div>
@@ -115,8 +134,20 @@
             <div class="stat"><span class="stat-value" id="over-wpm">0</span><span class="stat-label">WPM</span></div>
             <div class="stat"><span class="stat-value" id="over-acc">0%</span><span class="stat-label">Accuracy</span></div>
             <div class="stat"><span class="stat-value" id="over-combo">0</span><span class="stat-label">Longest combo</span></div>
+            <div class="stat"><span class="stat-value" id="over-streak">0</span><span class="stat-label">Perfect streak</span></div>
             <div class="stat"><span class="stat-value" id="over-wave">1</span><span class="stat-label">Wave reached</span></div>
-            <div class="stat"><span class="stat-value" id="over-kills">0</span><span class="stat-label">Ships destroyed</span></div>
+            <div class="stat"><span class="stat-value" id="over-words">0</span><span class="stat-label">Lexicon words</span></div>
+          </div>
+          <div class="intel">
+            <div class="intel-keys">
+              <h3>Your keyboard</h3>
+              <div class="keyboard" id="over-keyboard"></div>
+              <div class="key-legend"><i class="k-good"></i>solid <i class="k-mid"></i>shaky <i class="k-bad"></i>needs work</div>
+            </div>
+            <div class="intel-notes">
+              <h3>Typing intel</h3>
+              <ul id="over-insights"></ul>
+            </div>
           </div>
           <div class="start-prompt">
             <span class="prompt-label">Type</span>
@@ -125,6 +156,19 @@
           </div>
           <div class="scores compact">
             <table id="over-scores"></table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Lexicon (collected vocabulary) -->
+      <section id="screen-lexicon" class="screen screen-lexicon" aria-label="Lexicon">
+        <div class="lexicon-wrap">
+          <h2 class="screen-heading">Lexicon</h2>
+          <p class="lexicon-sub" id="lexicon-sub"></p>
+          <div class="lexicon-grid" id="lexicon-grid"></div>
+          <div class="lexicon-actions">
+            <button type="button" class="menu-item" id="lexicon-close" tabindex="-1"><kbd>Esc</kbd> Back</button>
+            <button type="button" class="opt" id="profile-reset" tabindex="-1">Reset typing profile</button>
           </div>
         </div>
       </section>

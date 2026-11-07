@@ -3,7 +3,9 @@ import { loadHighScores, submitHighScore } from './core/highscores';
 import { Layout } from './core/layout';
 import { SettingsStore } from './core/settings';
 import { Game } from './game/Game';
+import { Profile } from './game/profile';
 import { Renderer } from './render/Renderer';
+import { Intel } from './ui/Intel';
 import { UI, type ScreenName } from './ui/UI';
 
 /** Keys whose default browser behaviour (scrolling, find-in-page, focus moves, back navigation) we suppress. */
@@ -13,11 +15,11 @@ const SWALLOW = new Set([
 ]);
 
 const WAVE_NOTES: Record<number, string> = {
-  1: 'Type the words · protect the Spire',
-  2: 'Heavy cruisers detected',
-  3: 'Scout swarms inbound',
+  1: 'Type each transmission · capitals and punctuation count',
+  2: 'Longer transmissions detected',
+  3: 'Multi-sentence broadcasts inbound',
   5: 'The storm intensifies',
-  8: 'Longer callsigns · faster hulls',
+  8: 'Faster convoys · tighter formations',
   12: 'Full assault',
 };
 
@@ -26,8 +28,10 @@ export class App {
   private layout = new Layout();
   private settings = new SettingsStore();
   private sound = new Sound();
-  private game = new Game(this.layout);
+  private profile = new Profile();
+  private game = new Game(this.layout, this.profile);
   private ui = new UI();
+  private intel = new Intel();
   private renderer: Renderer;
   private screen: ScreenName = 'title';
   private lastTime = 0;
@@ -50,6 +54,7 @@ export class App {
     this.wireGameEvents();
     this.wireDom();
     this.ui.renderTitleScores(loadHighScores());
+    this.intel.renderTitleStats(this.profile);
     this.game.toIdle();
     this.setScreen('title');
   }
@@ -89,7 +94,11 @@ export class App {
       this.renderer.render(dt, paused);
       this.redrawWhilePaused = false;
     }
-    if (this.screen === 'playing' || this.screen === 'paused') this.ui.updateHud(this.game, dt);
+    if (this.screen === 'playing' || this.screen === 'paused') {
+      this.ui.updateHud(this.game, dt);
+      this.intel.update(this.game);
+    }
+    this.updateBand();
     this.updateMusic();
 
     if (this.screen === 'playing' && this.game.phase === 'over') this.showGameOver();
@@ -116,6 +125,15 @@ export class App {
     }
   }
 
+  /** Ships materialize just below the transmission bar; keep the layout in sync with the DOM. */
+  private bandTimer = 0;
+  private updateBand(): void {
+    if (--this.bandTimer > 0) return;
+    this.bandTimer = 15;
+    const playing = this.screen === 'playing' || this.screen === 'paused' || this.screen === 'gameover';
+    this.layout.bandY = playing ? this.intel.bandBottom() + 8 : 30 * this.layout.k;
+  }
+
   private pan(x: number): number {
     return (x / this.layout.w) * 2 - 1;
   }
@@ -134,6 +152,10 @@ export class App {
   private startGame(): void {
     this.renderer.particles.clear();
     this.ui.resetHud();
+    this.intel.clearCoach();
+    this.intel.hideCard();
+    this.intel.setIdleText('Awaiting transmission...');
+    this.intel.setCount(0, 0);
     this.hitStop = 0;
     this.game.start();
     this.setScreen('playing');
@@ -155,7 +177,27 @@ export class App {
     this.game.toIdle();
     this.renderer.particles.clear();
     this.ui.renderTitleScores(loadHighScores());
+    this.intel.renderTitleStats(this.profile);
+    this.intel.clearCoach();
+    this.intel.hideCard();
     this.setScreen('title');
+  }
+
+  private openLexicon(): void {
+    if (this.screen !== 'title') return;
+    this.intel.renderLexicon(this.profile);
+    this.setScreen('lexicon');
+  }
+
+  private closeLexicon(): void {
+    if (this.screen === 'lexicon') this.setScreen('title');
+  }
+
+  private resetProfile(): void {
+    if (!window.confirm('Reset your typing profile? Key statistics, streaks and collected words will be forgotten.')) return;
+    this.profile.reset();
+    this.intel.renderLexicon(this.profile);
+    this.intel.renderTitleStats(this.profile);
   }
 
   private showGameOver(): void {
@@ -169,6 +211,9 @@ export class App {
       date: new Date().toISOString(),
     });
     this.ui.setGameOver(this.game, rank, list);
+    this.intel.renderIntel(this.game);
+    this.intel.clearCoach();
+    this.intel.hideCard();
     this.overShownAt = performance.now();
     this.setScreen('gameover');
   }
@@ -215,7 +260,45 @@ export class App {
       if (enemy.def.kind === 'heavy') snd.spawnHeavy(this.pan(enemy.px));
     });
     ev.on('lock', ({ enemy }) => snd.lock(this.pan(enemy.px)));
-    ev.on('miss', () => snd.miss());
+    ev.on('miss', () => {
+      snd.miss();
+      this.intel.flashError();
+    });
+    ev.on('space', ({ next }) => snd.space(next ? this.pan(next.px) : 0));
+    ev.on('passageStart', ({ index, total }) => {
+      snd.transmission();
+      this.intel.setCount(index, total);
+      this.bandTimer = 0;
+    });
+    ev.on('passageComplete', ({ perfect, bonus }) => {
+      snd.passageComplete(perfect);
+      this.intel.complete();
+      if (bonus > 0) {
+        const L = this.layout;
+        this.renderer.particles.text({
+          text: `+${bonus.toLocaleString('en-US')}`,
+          sub: perfect ? 'PERFECT TRANSMISSION' : 'TRANSMISSION COMPLETE',
+          subColor: perfect ? '#ffd36b' : '#9ffcff',
+          x: L.cx,
+          y: L.bandY + 70 * L.k,
+          color: perfect ? '#ffd36b' : '#f5f7ff',
+          size: 28,
+          max: 1.6,
+        });
+      }
+    });
+    ev.on('sentenceDone', ({ perfect, streak }) => {
+      if (perfect && streak > 0) snd.streak(streak);
+    });
+    ev.on('vocab', ({ entry, isNew, clean, state }) => {
+      snd.lexicon(isNew);
+      this.intel.vocab(entry, isNew, clean, state, this.profile);
+    });
+    ev.on('coach', (msg) => {
+      if (this.screen === 'title') return;
+      snd.coach(msg.tone);
+      this.intel.coach(msg);
+    });
     ev.on('hit', ({ x }) => snd.hit(this.pan(x)));
     ev.on('kill', ({ enemy, x, perfect }) => {
       snd.explode(enemy.def.kind, this.pan(x));
@@ -230,7 +313,7 @@ export class App {
     ev.on('gameOver', () => snd.gameOver());
     ev.on('waveStart', ({ wave }) => {
       snd.waveStart();
-      const note = WAVE_NOTES[wave] ?? `${this.game.waveTotal} hostiles inbound`;
+      const note = WAVE_NOTES[wave] ?? `${this.game.passagesTotal} transmissions inbound`;
       this.ui.showBanner('Incoming', `Wave ${wave}`, note, 'wave');
     });
     ev.on('waveClear', ({ wave, bonus, flawless, perfect, repaired }) => {
@@ -277,6 +360,11 @@ export class App {
     this.ui.onMotionToggle(() => this.cycleMotion());
     this.ui.onPauseClick(() => this.pause());
     this.ui.onPauseMenu((a) => this.pauseAction(a));
+    this.ui.onLexicon(
+      () => this.openLexicon(),
+      () => this.closeLexicon(),
+      () => this.resetProfile(),
+    );
     document.getElementById('title-word')?.addEventListener('click', () => {
       this.sound.unlock();
       this.sound.uiConfirm();
@@ -315,13 +403,31 @@ export class App {
     return null;
   }
 
+  /** The exact character typed, for sentences: printable ASCII, case-sensitive. */
+  private charOf(e: KeyboardEvent): string | null {
+    if (e.key.length === 1) {
+      const c = e.key.charCodeAt(0);
+      if (c >= 32 && c <= 126) return e.key;
+    }
+    // Non-Latin layouts: fall back to the physical letter key.
+    if (e.key.length === 1 && /^Key[A-Z]$/.test(e.code)) {
+      const upper = e.shiftKey !== !!e.getModifierState?.('CapsLock');
+      const l = e.code.slice(3);
+      return upper ? l : l.toLowerCase();
+    }
+    return null;
+  }
+
   private onKeyDown = (e: KeyboardEvent): void => {
-    // Leave browser/OS shortcuts alone (Ctrl+R, Alt+Tab, F5, F11, F12 ...).
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    // Leave browser/OS shortcuts alone (Ctrl+R, Alt+Tab, F5, F11, F12 ...), but allow AltGr characters.
+    const altGr = !!e.getModifierState?.('AltGraph');
+    if ((e.ctrlKey || e.metaKey || e.altKey) && !altGr) return;
     if (/^F\d{1,2}$/.test(e.key)) return;
 
     const letter = this.letterOf(e);
-    if (letter || SWALLOW.has(e.key)) e.preventDefault();
+    const ch = this.charOf(e);
+    if (letter || ch || SWALLOW.has(e.key)) e.preventDefault();
+    this.intel.setCaps(this.screen === 'playing' && !!e.getModifierState?.('CapsLock'));
     if (e.isComposing || e.key === 'Dead') return;
 
     this.sound.unlock();
@@ -339,11 +445,14 @@ export class App {
       case 'playing':
         if (e.key === 'Escape') {
           if (!e.repeat) this.pause();
-        } else if (e.key === 'Backspace') {
-          this.game.release();
-        } else if (letter && !e.repeat) {
-          this.game.type(letter);
+        } else if (ch && !e.repeat) {
+          // Every printable character counts, including the space bar and punctuation.
+          this.game.type(ch);
         }
+        break;
+
+      case 'lexicon':
+        if (e.key === 'Escape' || e.key === 'Enter') this.closeLexicon();
         break;
 
       case 'paused':

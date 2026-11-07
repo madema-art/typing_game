@@ -1,6 +1,8 @@
 # KEYSTORM
 
-An arcade survival typing game. Enemy ships descend on the Spire, your planetary defence turret. Every ship carries a word. Type it to lock on and fire one laser bolt per correct letter. Finish the word to destroy the ship. If a ship reaches the shield, the shield takes damage. When the shield fails, the run ends.
+An arcade survival typing game. Funny, thought-provoking and slightly unhinged transmissions arrive one to three sentences at a time. Every word, with its punctuation, rides a ship falling toward the Spire, your planetary defence turret. Type the sentence exactly, with capitals, punctuation and spaces, and each correct character fires a laser. The last character of each word calls down lightning. If a word reaches the shield, the shield takes damage and that word is lost. When the shield fails, the run ends.
+
+KEYSTORM learns how you type. It spots repeated mistakes, works your weak keys into the next sentences, matches the pace to your speed, and teaches new vocabulary along the way.
 
 Built with Vite, TypeScript, Canvas 2D, CSS and Web Audio. It has no runtime services and no external assets: the music and sound are synthesized live, ships are drawn in code, and the fonts are bundled locally.
 
@@ -101,8 +103,8 @@ To uninstall, run **`D:\Keystorm\launcher\Uninstall-Keystorm.cmd`**. It removes 
 
 | Key | Action |
 | --- | --- |
-| **A–Z** | Type a ship's word. The first letter locks onto the matching ship nearest the shield, and each correct letter fires |
-| **Backspace** | Release the current lock. Letters you already typed on that ship stay typed |
+| **Any character** | Type the transmission. Capitals and punctuation must match; a wrong key is never inserted |
+| **Space** | Moves the lock to the next word's ship (the transmission bar shows when a space is due) |
 | **Esc** | Pause or resume. The game also pauses when the window loses focus |
 | **Enter** / type `start` | Start from the title screen |
 | **Enter** / type `again` | Restart from the game-over screen (**Esc** returns to the title) |
@@ -112,13 +114,19 @@ The speaker button in the bottom-right corner mutes sound at any time. The title
 
 ## How it plays
 
-- **Scouts** (amber) are fast and fragile, with short words. From wave 3 they sometimes arrive in swarms.
-- **Fighters** (pink) move at standard speed and carry medium-length words.
-- **Heavies** (violet) are slow and armoured, carry long words, and do 3 damage if they get through.
-- Each correct letter fires a plasma bolt. The final letter calls down a lightning strike that shatters the ship and scatters its letters. Heavies shed one armour plate per letter.
+- **Transmissions.** Each one appears in the bar at the top, and its words break off as ships in reading order. Later words are spaced by your measured typing speed, so the next word you need is always the closest. If you're ahead, the next ship warps down to meet you.
+- **Ship size follows word length.** Scouts carry short words, fighters medium ones, and heavies long ones (2 damage if they get through). Heavies shed one armour plate per letter.
+- **Lexicon words** ride gold ships and score double. Typing one shows its definition. The same word returns later in a *different* sentence (later this run, then after days) until you've mastered it. Your collection is on the title screen under **Lexicon**.
+- **Multi-sentence transmissions** (jokes with punchlines, mini-stories) appear once you're comfortable.
+- Each correct character fires a plasma bolt. The final character of a word calls down a lightning strike that shatters the ship and scatters its letters.
 - A wrong letter doesn't change the word. It breaks your combo and lowers your accuracy.
 - **Combo → multiplier:** ×2 at 10 correct letters in a row, ×3 at 25, ×4 at 50 and ×5 at 80. Your lasers change colour at each tier. At ×5 you enter **Overdrive**: magenta lasers, a pulsing frame and a lead melody in the soundtrack.
 - **Perfect word:** finish a word of 4+ letters without a miss for +25% points.
+- **Streaks:** sentences typed without a single mistake build a *perfect streak*, with bonus points and milestone callouts. KEYSTORM also tracks your longest combo and your daily play streak, and keeps all-time records.
+- **The coach.** It watches for patterns, such as *"You typed "o" for "i" again. Your fingers are gossiping."*, and the next sentences drill those keys and letter pairs. When a key improves, it says so.
+- **Adaptive pace.** Convoys tighten when you're flawless and ease off when words get through. Sentence length and difficulty follow your skill.
+- **Typing Intel.** After each run you get a keyboard heatmap of your strong and weak keys, your most common slip, speed against your average, streaks, and the words you met.
+- **Your profile** (key statistics, records, streaks and lexicon) is saved in the browser. You can reset it from the Lexicon screen.
 - Clearing a wave earns a bonus. A *Flawless* wave (no shield damage) also repairs one shield segment, and *Perfect accuracy* earns extra points.
 - **WPM** is (correct characters ÷ 5) ÷ active typing minutes. Active time starts at your first keystroke and only counts while ships are on screen. Pauses, menus and wave breaks don't count.
 - Your 8 best runs are saved in your browser's `localStorage`.
@@ -133,7 +141,10 @@ src/
     Game.ts          simulation: spawning, targeting, typing, bolts, damage, waves, game over
     director.ts      difficulty curve per wave
     enemyTypes.ts    scout / fighter / heavy definitions
-    words.ts         curated word bank + picker (no repeats, distinct first letters)
+    profile.ts       long-term typing model: per-key/pair accuracy & speed, slips, records, streaks, vocabulary
+    coach.ts         in-run pattern spotting, focus keys and commentary
+    picker.ts        chooses each transmission: difficulty fit, weak-key practice, vocabulary reviews, novelty
+    text/            sentence bank and jokes, lexicon, weak-key-aware sentence generator, passage parsing
     stats.ts         score, combo, multiplier, WPM, accuracy
     config.ts        tuning constants
     entities.ts      Enemy / Bolt / Turret types

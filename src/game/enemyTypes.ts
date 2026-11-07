@@ -16,8 +16,6 @@ export interface EnemyDef {
   weaveFreq: number;
   /** Progress pushed back per laser hit (fragile ships get knocked back more). */
   knockback: number;
-  /** Word length range as a function of wave number. */
-  wordLen: (wave: number) => [number, number];
 }
 
 export const ENEMY_DEFS: Record<EnemyKind, EnemyDef> = {
@@ -32,7 +30,6 @@ export const ENEMY_DEFS: Record<EnemyKind, EnemyDef> = {
     weaveAmp: 16,
     weaveFreq: 2.2,
     knockback: 0.006,
-    wordLen: (w) => (w < 4 ? [3, 4] : w < 8 ? [3, 5] : [4, 5]),
   },
   fighter: {
     kind: 'fighter',
@@ -45,7 +42,6 @@ export const ENEMY_DEFS: Record<EnemyKind, EnemyDef> = {
     weaveAmp: 5,
     weaveFreq: 0.9,
     knockback: 0.004,
-    wordLen: (w) => (w < 3 ? [5, 6] : w < 7 ? [5, 7] : [6, 8]),
   },
   heavy: {
     kind: 'heavy',
@@ -58,6 +54,5 @@ export const ENEMY_DEFS: Record<EnemyKind, EnemyDef> = {
     weaveAmp: 0,
     weaveFreq: 0,
     knockback: 0.0015,
-    wordLen: (w) => (w < 4 ? [8, 9] : w < 8 ? [8, 11] : [9, 13]),
   },
 };
