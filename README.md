@@ -36,32 +36,66 @@ npm run preview
 
 ## Desktop shortcut (Windows)
 
-Want KEYSTORM on your desktop like a regular game? From this folder, double-click **`Install-Keystorm.cmd`**.
+KEYSTORM installs to **`D:\Keystorm`** with Desktop and Start menu shortcuts. You don't need admin rights. You do need **Node.js 22 LTS** from [nodejs.org](https://nodejs.org), which builds the game.
 
-The installer does the following, without needing admin rights:
+**Without a copy of this project:** open PowerShell and run
+
+```powershell
+irm https://raw.githubusercontent.com/madema-art/typing_game/refs/heads/claude/brave-edison-9nckwo/launcher/Get-Keystorm.ps1 | iex
+```
+
+**From a copy of this project:** double-click **`Install-Keystorm.cmd`** in this folder.
+
+The installer does the following:
 
 1. Checks that Node.js 22+ is installed.
-2. Installs to `%LOCALAPPDATA%\Keystorm` and builds **`KEYSTORM.exe`**, a small launcher with the KEYSTORM icon. It's compiled on your PC by the C# compiler that ships with Windows.
-3. Downloads and builds the latest version of the game from GitHub.
-4. Adds **KEYSTORM** shortcuts to your Desktop and Start menu.
+2. Creates `D:\Keystorm` if needed and checks that it can write there.
+3. Builds **`KEYSTORM.exe`**, a small launcher with the KEYSTORM icon. It's compiled on your PC by the C# compiler that ships with Windows.
+4. Downloads and builds the latest version of the game from GitHub.
+5. Adds **KEYSTORM** shortcuts to your Desktop and Start menu.
+6. If you installed before to `%LOCALAPPDATA%\Keystorm`, moves your saved high scores and settings to the new folder and removes the old copy.
+
+To install somewhere else, pass `-InstallDir`:
+
+```bat
+Install-Keystorm.cmd -InstallDir "E:\Games\Keystorm"
+```
+
+With the web installer, set `$env:KEYSTORM_DIR = 'E:\Games\Keystorm'` first.
 
 Each time you open the shortcut, a splash screen appears and the launcher:
 
 - **checks GitHub for a newer version.** If there is one, it downloads and builds it before starting, and shows the progress on the splash. A failed update leaves the installed version working.
 - **plays the installed version if you're offline.**
-- **opens the game in its own window** using Edge or Chrome in app mode, so there are no tabs or address bar. Your high scores are saved there.
+- **opens the game in its own window** using Edge or Chrome in app mode, so there are no tabs or address bar.
 - **stops the game's local server** when you close the window.
 
-The launcher reads its settings from `%LOCALAPPDATA%\Keystorm\launcher.config.json`:
+Everything KEYSTORM keeps is inside the install folder:
+
+| Path in `D:\Keystorm` | Contents |
+| --- | --- |
+| `KEYSTORM.exe` | The launcher the shortcuts open |
+| `launcher\` | Update/server script, installer, uninstaller, icon and splash art |
+| `game\` | The installed game and its build |
+| `browser-profile\` | The game window's browser data, **including your saved high scores** |
+| `launcher.config.json` | Launcher settings (see below) |
+| `state.json` | Which version is installed |
+| `logs\` | `core.log` (updates and server) and `launcher.log` |
+
+Updates replace only `game\` and `launcher\`. Your scores and settings are never touched.
+
+Launcher settings in `launcher.config.json`:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `branch` | `""` | Branch to follow. Empty means the repository's default branch |
 | `checkForUpdates` | `true` | Set to `false` to always launch the installed version |
 | `browser` | `"auto"` | `auto` (Edge, then Chrome), `edge`, `chrome`, or `default` (a normal browser tab) |
-| `port` | `47615` | Local port the game is served on. Your saved scores belong to this port |
+| `port` | `47615` | Local port the game is served on. Your saved scores belong to this port, so don't change it |
 
-If something goes wrong, the splash screen shows the error. Press **Enter** to retry or **L** to open the logs in `%LOCALAPPDATA%\Keystorm\logs`. To remove everything, run **`Uninstall-Keystorm.cmd`** in `%LOCALAPPDATA%\Keystorm\launcher`.
+If something goes wrong, the splash screen shows the error. Press **Enter** to retry or **L** to open `D:\Keystorm\logs`.
+
+To uninstall, run **`D:\Keystorm\launcher\Uninstall-Keystorm.cmd`**. It removes the shortcuts, the game and the launcher. It keeps your high scores and settings unless you choose to delete them, so reinstalling to the same folder brings them back.
 
 ## Controls
 
@@ -117,6 +151,7 @@ launcher/
   keystorm-core.mjs  update check, download, build and local server (Node, no dependencies)
   KeystormLauncher.cs  splash-screen launcher, compiled to KEYSTORM.exe on install
   Install-Keystorm.ps1 / Uninstall-Keystorm.ps1
+  Get-Keystorm.ps1   one-command web installer (downloads the project, runs the installer)
   assets/            icon and splash art (sources and render script in assets/src)
   core/              layout, math, events, settings, storage, high scores
 ```

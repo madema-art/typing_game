@@ -3,16 +3,21 @@
     Installs KEYSTORM for the current user and creates a desktop shortcut.
 
 .DESCRIPTION
-    - Copies the launcher to %LOCALAPPDATA%\Keystorm (no admin rights needed)
+    - Installs to D:\Keystorm, creating the folder if needed (no admin rights needed)
     - Compiles KEYSTORM.exe (the splash-screen launcher) with the C# compiler
       that ships with Windows, embedding the KEYSTORM icon
     - Downloads and builds the latest version of the game from GitHub
     - Creates "KEYSTORM" shortcuts on the Desktop and in the Start menu
+    - Moves saved high scores and settings over from an earlier install in
+      %LOCALAPPDATA%\Keystorm, if there is one
 
-    Every launch then checks GitHub for a newer version before starting.
+    Everything KEYSTORM keeps (game, launcher, updates, logs, settings and
+    saved scores) lives inside the install folder. Every launch checks GitHub
+    for a newer version before starting.
 
 .PARAMETER InstallDir
-    Where to install. Defaults to %LOCALAPPDATA%\Keystorm.
+    Where to install. Defaults to D:\Keystorm. Example for another drive:
+    Install-Keystorm.cmd -InstallDir "E:\Games\Keystorm"
 
 .PARAMETER CompileOnly
     Only (re)build KEYSTORM.exe. Used by the launcher to update itself.
@@ -23,7 +28,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Keystorm'),
+    [string]$InstallDir = 'D:\Keystorm',
     [switch]$CompileOnly,
     [switch]$NoDesktopShortcut,
     [switch]$NoStartMenuShortcut,
@@ -32,6 +37,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $SourceDir = $PSScriptRoot
+# Absolute path, resolved against the PowerShell location (works for folders that don't exist yet).
+$InstallDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallDir).TrimEnd('\')
+$LegacyDir = Join-Path $env:LOCALAPPDATA 'Keystorm'
 $LauncherDir = Join-Path $InstallDir 'launcher'
 $ExePath = Join-Path $InstallDir 'KEYSTORM.exe'
 
@@ -131,6 +139,95 @@ function New-Shortcut([string]$Path) {
     [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
 }
 
+function Initialize-InstallDir {
+    # Make sure the drive exists and is writable, then create the folder. No admin rights needed:
+    # standard users may create folders at the root of a Windows data drive and own what they create.
+    $root = [IO.Path]::GetPathRoot($InstallDir)
+    if ($root -match '^[A-Za-z]:\\?$') {
+        $drive = New-Object IO.DriveInfo $root
+        if (-not $drive.IsReady) {
+            Stop-WithError "Drive $($root.TrimEnd('\')) is not available. Connect it, or install somewhere else, e.g.:  Install-Keystorm.cmd -InstallDir `"C:\Games\Keystorm`""
+        }
+        if ($drive.DriveType -eq [IO.DriveType]::CDRom) {
+            Stop-WithError "Drive $($root.TrimEnd('\')) is a CD/DVD drive. Install somewhere else, e.g.:  Install-Keystorm.cmd -InstallDir `"C:\Games\Keystorm`""
+        }
+    }
+    try {
+        New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+        $probe = Join-Path $InstallDir ('.write-test-' + [Guid]::NewGuid().ToString('N'))
+        [IO.File]::WriteAllText($probe, 'ok')
+        Remove-Item -LiteralPath $probe -Force
+    }
+    catch {
+        Stop-WithError "Windows did not allow KEYSTORM to write to $InstallDir ($($_.Exception.Message)). Create the folder in File Explorer first, or choose another folder with -InstallDir."
+    }
+}
+
+function Stop-KeystormProcesses([string]$Dir) {
+    # The launcher, its local game server and the game window all have the install folder in their command line.
+    # Match the folder itself, not a sibling such as D:\Keystorm2.
+    $pattern = [regex]::Escape($Dir.TrimEnd('\')) + '(\\|"|\s|$)'
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -in @('KEYSTORM.exe', 'node.exe', 'msedge.exe', 'chrome.exe') -and $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine -match $pattern } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    $exe = (Join-Path $Dir 'KEYSTORM.exe').ToLowerInvariant()
+    Get-Process -Name 'KEYSTORM' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -and $_.Path.ToLowerInvariant() -eq $exe } |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+}
+
+function Move-LegacyInstall {
+    # Earlier versions installed to %LOCALAPPDATA%\Keystorm. Bring the saved high scores
+    # (they live in the game window's browser profile) and settings over, then remove the old copy.
+    if (-not (Test-Path -LiteralPath $LegacyDir)) { return }
+    if ($LegacyDir.TrimEnd('\') -ieq $InstallDir) { return }
+    $legacyProfile = Join-Path $LegacyDir 'browser-profile'
+    $legacyConfig = Join-Path $LegacyDir 'launcher.config.json'
+    if (-not (Test-Path -LiteralPath $legacyProfile) -and -not (Test-Path -LiteralPath $legacyConfig)) { return }
+
+    Write-Step "Moving saved scores and settings from $LegacyDir"
+    Stop-KeystormProcesses $LegacyDir
+    Start-Sleep -Milliseconds 800
+
+    $newProfile = Join-Path $InstallDir 'browser-profile'
+    $scoresSafe = $true
+    if (Test-Path -LiteralPath $legacyProfile) {
+        if (Test-Path -LiteralPath $newProfile) {
+            # Both places have saved data: keep the new one active and leave the old one untouched.
+            $scoresSafe = $false
+            Write-Ok 'Keeping the scores already saved in the new location'
+        }
+        else {
+            try {
+                Copy-Item -LiteralPath $legacyProfile -Destination $newProfile -Recurse -Force -ErrorAction Stop
+                Write-Ok 'High scores moved'
+            }
+            catch {
+                $scoresSafe = $false
+                Write-Host "    Could not copy saved scores: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+    }
+    $newConfig = Join-Path $InstallDir 'launcher.config.json'
+    if ((Test-Path -LiteralPath $legacyConfig) -and -not (Test-Path -LiteralPath $newConfig)) {
+        Copy-Item -LiteralPath $legacyConfig -Destination $newConfig -Force
+        Write-Ok 'Settings moved'
+    }
+
+    if ($scoresSafe) {
+        Remove-Item -LiteralPath $LegacyDir -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $LegacyDir) {
+            Write-Host "    The old copy in $LegacyDir could not be fully removed; you can delete it later." -ForegroundColor Yellow
+        }
+        else {
+            Write-Ok 'Old copy removed'
+        }
+    }
+    else {
+        Write-Host "    The old copy was left in $LegacyDir so no scores are lost." -ForegroundColor Yellow
+    }
+}
+
 # ---------------------------------------------------------------------------- compile-only mode
 
 if ($CompileOnly) {
@@ -154,7 +251,9 @@ if (-not $nodeVersion -or $nodeVersion.Major -eq 21 -or $nodeVersion -lt $minimu
 }
 Write-Ok "Node.js $nodeVersion"
 
-Write-Step "Installing launcher to $InstallDir"
+Write-Step "Installing to $InstallDir"
+Initialize-InstallDir
+Move-LegacyInstall
 New-Item -ItemType Directory -Force -Path $LauncherDir | Out-Null
 $sameDir = (Resolve-Path -LiteralPath $SourceDir).Path.TrimEnd('\') -eq (Resolve-Path -LiteralPath $LauncherDir).Path.TrimEnd('\')
 if (-not $sameDir) {
@@ -203,7 +302,7 @@ if (-not $NoStartMenuShortcut) {
 }
 
 Write-Host ''
-Write-Host '  KEYSTORM is installed. Every launch checks for updates first.' -ForegroundColor Green
+Write-Host "  KEYSTORM is installed in $InstallDir. Every launch checks for updates first." -ForegroundColor Green
 Write-Host "  To uninstall, run $(Join-Path $LauncherDir 'Uninstall-Keystorm.cmd')" -ForegroundColor DarkGray
 Write-Host ''
 if (-not $Quiet) {
