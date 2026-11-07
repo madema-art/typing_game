@@ -34,6 +34,35 @@ npm run build
 npm run preview
 ```
 
+## Desktop shortcut (Windows)
+
+Want KEYSTORM on your desktop like a regular game? From this folder, double-click **`Install-Keystorm.cmd`**.
+
+The installer does the following, without needing admin rights:
+
+1. Checks that Node.js 22+ is installed.
+2. Installs to `%LOCALAPPDATA%\Keystorm` and builds **`KEYSTORM.exe`**, a small launcher with the KEYSTORM icon. It's compiled on your PC by the C# compiler that ships with Windows.
+3. Downloads and builds the latest version of the game from GitHub.
+4. Adds **KEYSTORM** shortcuts to your Desktop and Start menu.
+
+Each time you open the shortcut, a splash screen appears and the launcher:
+
+- **checks GitHub for a newer version.** If there is one, it downloads and builds it before starting, and shows the progress on the splash. A failed update leaves the installed version working.
+- **plays the installed version if you're offline.**
+- **opens the game in its own window** using Edge or Chrome in app mode, so there are no tabs or address bar. Your high scores are saved there.
+- **stops the game's local server** when you close the window.
+
+The launcher reads its settings from `%LOCALAPPDATA%\Keystorm\launcher.config.json`:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `branch` | `""` | Branch to follow. Empty means the repository's default branch |
+| `checkForUpdates` | `true` | Set to `false` to always launch the installed version |
+| `browser` | `"auto"` | `auto` (Edge, then Chrome), `edge`, `chrome`, or `default` (a normal browser tab) |
+| `port` | `47615` | Local port the game is served on. Your saved scores belong to this port |
+
+If something goes wrong, the splash screen shows the error. Press **Enter** to retry or **L** to open the logs in `%LOCALAPPDATA%\Keystorm\logs`. To remove everything, run **`Uninstall-Keystorm.cmd`** in `%LOCALAPPDATA%\Keystorm\launcher`.
+
 ## Controls
 
 | Key | Action |
@@ -84,6 +113,11 @@ src/
     Music.ts         adaptive procedural soundtrack (lookahead scheduler)
     Sound.ts         game sound effects, tuned to the music
   ui/UI.ts           DOM HUD, banners, title / pause / game-over screens
+launcher/
+  keystorm-core.mjs  update check, download, build and local server (Node, no dependencies)
+  KeystormLauncher.cs  splash-screen launcher, compiled to KEYSTORM.exe on install
+  Install-Keystorm.ps1 / Uninstall-Keystorm.ps1
+  assets/            icon and splash art (sources and render script in assets/src)
   core/              layout, math, events, settings, storage, high scores
 ```
 
